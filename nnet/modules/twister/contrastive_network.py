@@ -43,13 +43,14 @@ class ContrastiveNetwork(nn.Module):
             act_fun=act_fun
         )
 
-    def forward(self, feats, embed):
+    def forward(self, feats, embed1, embed2):
 
         # print(feats.shape, embed.shape)
 
         # MLP Layers
         x = self.mlp_feats(feats)
-        y = self.mlp_embed(embed)
+        y = self.mlp_embed(embed1)
+        z = self.mlp_embed(embed2)
 
-        return x, y
+        return x, y, z
     

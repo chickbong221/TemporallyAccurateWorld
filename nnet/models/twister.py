@@ -171,7 +171,7 @@ class TWISTER(models.Model):
         self.config.contrastive_augments = torchvision.transforms.RandomResizedCrop(size=(64, 64), antialias=True, scale=(0.25, 1))
         self.config.contrastive_hidden_size = self.config.model_hidden_size
         self.config.contrastive_out_size = self.config.contrastive_hidden_size
-        self.config.contrastive_steps = 10
+        self.config.contrastive_steps = 1
         self.config.contrastive_exp_lambda = 0.75
         self.config.contrastive_layers = 2
 
@@ -845,46 +845,45 @@ class TWISTER(models.Model):
             # Model Contrastive Loss
             ###############################################################################
 
-            # Flatten B and L to ensure diff augment for each sample (B*L, 3, H, W)
+            # Flatten B and L to ensure different augmentation per sample (B*L, 3, H, W)
             states_flatten = states.flatten(0, 1)
 
-            # Augment
-            states_aug = torch.stack([self.config.contrastive_augments(states_flatten[b]) for b in range(states_flatten.shape[0])], dim=0).reshape(states.shape)
+            # Augment each frame independently
+            states_aug = torch.stack(
+                [self.config.contrastive_augments(states_flatten[b]) for b in range(states_flatten.shape[0])],
+                dim=0
+            ).reshape(states.shape)
 
-            # Forward
-            posts_con = self.encoder_network(states_aug)
+            # Encode both original and augmented images
+            posts_con_ori = self.encoder_network(states_flatten)
+            posts_con_aug = self.encoder_network(states_aug)
 
-            # Contrastive steps loop
-            for t in range(self.config.contrastive_steps):
+            # Model latent features (predicted)
+            feats_model = self.rssm.get_feat(priors)
 
-                # Action condition (B, L-t, A*t)
-                if t > 0:
-                    actions_cond = torch.cat([actions[:, 1+t_:min(actions.shape[1], actions.shape[1]+1+t_-t)] for t_ in range(t)], dim=-1)
+            # Pass through contrastive projection network (resize/transform)
+            # Expect the network to take feats + two embeddings (original & augmented)
+            feats_model_proj, feats_state_proj, feats_state_aug_proj = self.contrastive_network[0](
+                feats=feats_model,
+                embed1=posts_con_ori["stoch"].flatten(-2, -1),
+                embed2=posts_con_aug["stoch"].flatten(-2, -1),
+            )
 
-                # Contrastive features (B, L-t, D)
-                features_feats, features_embed = self.contrastive_network[t](
-                    feats=self.rssm.get_feat(priors) if t==0 else torch.cat([self.rssm.get_feat(priors)[:, :-t], actions_cond], dim=-1), 
-                    embed=posts_con["stoch"].flatten(-2, -1) if t==0 else posts_con["stoch"].flatten(-2, -1)[:, t:]
-                )
-                    
-                # Compute contrastive loss
-                if features_feats.dtype != torch.float32:
-                    with torch.cuda.amp.autocast(enabled=False):
-                        info_nce_loss, acc_con = self.compute_contrastive_loss(features_feats.type(torch.float32), features_embed.type(torch.float32))
-                        info_nce_loss = info_nce_loss.type(features_feats.dtype)
-                else:
-                    info_nce_loss, acc_con = self.compute_contrastive_loss(features_feats, features_embed)
+            # Compute temporal contrastive loss
+            info_nce_loss, acc_con = self.compute_temporal_contrastive_loss(
+                feats_model=feats_model_proj,
+                feats_state=feats_state_proj,
+                feats_state_aug=feats_state_aug_proj,
+                window=self.config.contrastive_window if hasattr(self.config, "contrastive_window") else 3
+            )
 
-                # Add Loss
-                self.add_loss(
-                    name="model_contrastive_{}".format(t), 
-                    loss=- info_nce_loss.mean(), 
-                    weight=self.config.loss_contrastive_scale * (self.config.contrastive_exp_lambda ** t) * ( (1.0 / sum([self.config.contrastive_exp_lambda ** t_ for t_ in range(self.config.contrastive_steps)])))
-                )
-
-                # Add Accuracy                    
-                self.add_metric("acc_con" if t==0 else "acc_con_{}".format(t), acc_con)
-
+            # Add Loss and Metric
+            self.add_loss(
+                name="model_contrastive",
+                loss=info_nce_loss,
+                weight=self.config.loss_contrastive_scale
+            )
+            self.add_metric("acc_con", acc_con)
             ###############################################################################
             # Model Reconstruction Loss
             ###############################################################################
@@ -1161,6 +1160,69 @@ class TWISTER(models.Model):
         lambda_values = torch.stack(list(reversed(vals))[:-1], dim=1)
 
         return lambda_values
+    
+    def compute_temporal_contrastive_loss(self, feats_model, feats_state, feats_state_aug, window=3):
+        """
+        feats_model: predicted latent features from RSSM (B, L, D)
+        feats_state: encoded true states (B, L, D)
+        feats_state_aug: encoded augmented true states (B, L, D)
+        window: temporal window for positives (+/- t)
+        """
+        B, L, D = feats_model.shape
+        losses = []
+        accs = []
+
+        # Flatten everything for similarity matrix
+        feats_model_flat = feats_model.reshape(B * L, D)                # anchors
+        feats_all_flat = torch.cat([
+            feats_state.reshape(B * L, D),
+            feats_state_aug.reshape(B * L, D)
+        ], dim=0)                                                       # positives + negatives
+
+        # Compute similarity (dot product)
+        sim_matrix = feats_model_flat @ feats_all_flat.T  # (B*L, 2*B*L)
+        sim_matrix /= torch.sqrt(torch.tensor(D, device=sim_matrix.device))
+
+        # Build mask of valid positives
+        mask = torch.zeros_like(sim_matrix, dtype=torch.bool)  # (B*L, 2*B*L)
+
+        for b in range(B):
+            for t in range(L):
+                anchor_idx = b * L + t
+                for dt in range(-window, window + 1):
+                    tp = t + dt
+                    if 0 <= tp < L:
+                        pos_idx_real = b * L + tp                # from feats_state
+                        pos_idx_aug = B * L + (b * L + tp)       # from feats_state_aug
+                        mask[anchor_idx, pos_idx_real] = True
+                        mask[anchor_idx, pos_idx_aug] = True
+
+        # Compute log-softmax for each anchor
+        logsumexp_all = torch.logsumexp(sim_matrix, dim=-1)
+        
+        # Positive similarities
+        sim_pos = sim_matrix[mask].reshape(B * L, -1)  # each row: multiple positives
+        logsumexp_pos = torch.logsumexp(sim_pos, dim=-1)
+
+        # InfoNCE-like loss: encourage high sim for positives
+        loss = -(logsumexp_pos - logsumexp_all)
+        loss = loss.mean()
+
+        # Compute accuracy (anchor’s max sim belongs to any of its positives)
+        preds = sim_matrix.argmax(dim=-1)
+        correct_mask = torch.zeros_like(preds, dtype=torch.bool)
+        for b in range(B):
+            for t in range(L):
+                anchor_idx = b * L + t
+                for dt in range(-window, window + 1):
+                    tp = t + dt
+                    if 0 <= tp < L:
+                        if preds[anchor_idx] in [b * L + tp, B * L + (b * L + tp)]:
+                            correct_mask[anchor_idx] = True
+                            break
+        acc = correct_mask.float().mean()
+
+        return loss, acc
     
     def compute_contrastive_loss(self, features_x, features_y):
 
