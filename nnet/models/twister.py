@@ -877,7 +877,7 @@ class TWISTER(models.Model):
 
             # === 5. Compute temporal contrastive loss ===
             info_nce_loss, acc_con = self.compute_temporal_contrastive_loss(
-                feats1, feats2, window=self.config.get("contrastive_window", 1)
+                feats1, feats2, window=self.config.get("contrastive_window", 0)
             )
 
             self.add_loss(
@@ -1185,7 +1185,7 @@ class TWISTER(models.Model):
         sim_matrix = anchors @ feats_all.T  # (B*L, B*L)
 
         # Scale by temperature
-        temp = getattr(self.config, "contrastive_temp", 0.1)
+        temp = self.config.get("contrastive_temp", 0.1)
         sim_matrix = sim_matrix / temp
 
         # Build positive mask
