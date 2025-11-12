@@ -27,6 +27,7 @@ import os
 import argparse
 import importlib
 import warnings
+import wandb
 
 # Disable Warnings
 warnings.filterwarnings("ignore")
@@ -36,6 +37,9 @@ def main(args):
     ###############################################################################
     # Init
     ###############################################################################
+
+    if args.wandb:
+        wandb.login(key="b1d6eed8871c7668a889ae74a621b5dbd2f3b070")
 
     # Print Mode
     print("Mode: {}".format(args.mode))

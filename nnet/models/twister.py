@@ -156,7 +156,7 @@ class TWISTER(models.Model):
         self.config.loss_decoder_scale = 1.0
         self.config.loss_kl_prior_scale = 0.5
         self.config.loss_kl_post_scale = 0.1
-        self.config.loss_contrastive_scale = 1.0
+        self.config.loss_contrastive_scale = 0.3
 
         # TSSM
         self.config.att_context_left = 8 # C must be <= L
