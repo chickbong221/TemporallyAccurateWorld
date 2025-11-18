@@ -16,6 +16,7 @@
 import torch
 from torch import nn
 import torchvision
+import random
 
 # NeuralNets
 from nnet import models
@@ -176,6 +177,14 @@ class TWISTER(models.Model):
         self.config.contrastive_exp_lambda = 0.75
         self.config.contrastive_layers = 2
 
+        # Adversarial
+        self.config.window_size = [4, 8, 16]
+        self.config.adversarial_hidden_size = 256
+        self.config.adversarial_num_heads = 8
+        self.config.adversarial_num_layers = 2
+        self.config.adversarial_max_perms = 1000
+        self.config.tod_scale = 0.1
+
         # Sample Pre Fill Steps
         self.config.random_pre_fill_steps = True
 
@@ -279,7 +288,28 @@ class TWISTER(models.Model):
             out_size=self.config.contrastive_out_size,
             num_layers=self.config.contrastive_layers
         ) for t in range(self.config.contrastive_steps)])
+
+        # self.discriminator_network = twister_networks.TemporalDiscriminator(
+        #     num_layers=4,
+        #     num_heads=4,
+        #     dropout=0.1
+        # )
+
+        self.temporal_order_discriminator = nn.ModuleList([twister_networks.TemporalOrderDiscriminator(
+            feat_dim=128,
+            window_size=w,
+            hidden_dim=128,
+            num_heads=8,
+            num_layers=2,
+            max_perms=1000
+        ) for w in self.config.window_size])
         
+        def count_parameters(model_list):
+            total_params = sum(p.numel() for model in model_list for p in model.parameters())
+            print(f"Total parameters in ModuleList: {total_params:,}")
+
+        count_parameters(self.temporal_order_discriminator)
+
         # Slow Moving Networks
         self.add_frozen("v_target", copy.deepcopy(self.value_network))
 
@@ -489,6 +519,18 @@ class TWISTER(models.Model):
             metrics=None,
             decoders=None
         )
+
+        # self.discriminator_network.opt_disc = torch.optim.Adam(self.discriminator_network.parameters(), lr=2e-4, betas=(0.5, 0.999))
+
+        self.tod_optimizers = [
+            torch.optim.Adam(
+                tod.parameters(),
+                lr=self.config.model_lr,
+                betas=(0.5, 0.999),
+                eps=self.config.model_eps
+            )
+            for tod in self.temporal_order_discriminator
+        ]
 
         # Model Step
         self.model_step = self.world_model.optimizer.param_groups[0]["lr_scheduler"].model_step
@@ -797,6 +839,8 @@ class TWISTER(models.Model):
             self.reward_network = self.outer.reward_network
             self.rssm = self.outer.rssm
             self.contrastive_network = self.outer.contrastive_network
+            # self.discriminator_network = self.outer.discriminator_network
+            self.temporal_order_discriminator = self.outer.temporal_order_discriminator
 
         def __getattr__(self, name):
             return getattr(self.outer, name)
@@ -844,48 +888,153 @@ class TWISTER(models.Model):
             discount_pred = self.continue_network(feats)
 
             ###############################################################################
+            # Model Temporal Loss
+            # Now the code try to identify particular temporal orders in sequences of features
+            # You can also make it realize if the window is consecutive or not
+            ###############################################################################
+
+            # === 1. Extract real & fake features ===
+            real_feats = latent["stoch"].flatten(-2, -1).detach()     # (B, L, D) real, no grad
+            fake_feats = priors["stoch"].flatten(-2, -1)              # (B, L, D) fake, grad to RSSM
+
+            B, L, D = real_feats.shape
+
+            total_loss_tod_rssm = 0.0
+            active_tods = 0
+
+            for tod_idx, tod in enumerate(self.temporal_order_discriminator):
+                window_size = self.config.window_size[tod_idx]
+
+                if L < window_size:
+                    continue  # Skip TODs whose window size is too large
+
+                active_tods += 1
+
+                # === 2. Extract all consecutive windows ===
+                num_windows = L - window_size + 1
+                total_samples = B * num_windows
+
+                # Build sliding windows efficiently (vectorized)
+                windows_real = torch.stack(
+                    [real_feats[:, i:i+window_size] for i in range(num_windows)],
+                    dim=1
+                ).reshape(total_samples, window_size, D)
+
+                windows_fake = torch.stack(
+                    [fake_feats[:, i:i+window_size] for i in range(num_windows)],
+                    dim=1
+                ).reshape(total_samples, window_size, D)
+
+                # === 3. Random permutation assignment ===
+                num_perms = tod.num_perm
+
+                # Real windows
+                perm_ids_real = torch.randint(0, num_perms, (total_samples,), device=real_feats.device)
+                perm_real_idx = tod.perm_indices[perm_ids_real]              # (N, window_size)
+                windows_perm_real = windows_real[torch.arange(total_samples).unsqueeze(-1), perm_real_idx]
+
+                # Fake windows
+                perm_ids_fake = torch.randint(0, num_perms, (total_samples,), device=fake_feats.device)
+                perm_fake_idx = tod.perm_indices[perm_ids_fake]
+                windows_perm_fake = windows_fake[torch.arange(total_samples).unsqueeze(-1), perm_fake_idx]
+
+                # === 4. Train TOD on real windows ===
+                logits_real = tod(windows_perm_real)
+                loss_tod_real = F.cross_entropy(logits_real, perm_ids_real)
+
+                self.tod_optimizers[tod_idx].zero_grad(set_to_none=True)
+                loss_tod_real.backward()
+                self.tod_optimizers[tod_idx].step()
+
+                # === 5. Train RSSM to fool TOD (TOD frozen) ===
+                with torch.no_grad():
+                    logits_fake = tod(windows_perm_fake)
+
+                loss_tod_rssm = F.cross_entropy(logits_fake, perm_ids_fake)
+                total_loss_tod_rssm += loss_tod_rssm
+
+
+            # === 6. Combine adversarial TOD loss into RSSM ===
+            if active_tods > 0:
+                avg_loss = total_loss_tod_rssm / active_tods
+                self.add_loss("model_temporal_order", avg_loss, weight=self.config.tod_scale)
+
+            ###############################################################################
+            # Model Discriminator Loss
+            ###############################################################################
+
+            # def discriminator_loss(D_real, D_fake):
+            #     # real -> +1, fake -> -1
+            #     loss_real = F.relu(1.0 - D_real).mean()
+            #     loss_fake = F.relu(1.0 + D_fake).mean()
+            #     return 0.5 * (loss_real + loss_fake)
+
+            # def world_model_adv_loss(D_fake):
+            #     # world model tries to make D_fake large (realistic)
+            #     return -D_fake.mean()
+
+            # # print(self.model_step)
+            # if self.model_step >= 20000:
+            #     real_latent = latent["stoch"].flatten(-2, -1).detach()
+            #     fake_latent = priors["stoch"].flatten(-2, -1).detach()
+
+            #     # Discriminator
+            #     D_real = self.discriminator_network(real_latent)
+            #     D_fake = self.discriminator_network(fake_latent)
+
+            #     loss_D = discriminator_loss(D_real, D_fake)
+
+            #     # Update discriminator
+            #     self.discriminator_network.opt_disc.zero_grad(set_to_none=True)
+            #     loss_D.backward()
+            #     self.discriminator_network.opt_disc.step()
+
+            #     D_fake_for_G = self.discriminator_network(priors["stoch"].flatten(-2, -1))
+            #     self.add_loss("model_discriminator", world_model_adv_loss(D_fake_for_G), weight=0.3)
+            
+            ###############################################################################
             # Model Contrastive Loss
             ###############################################################################
 
-            # Flatten B and L to ensure different augmentation per sample (B*L, 3, H, W)
-            states_flatten = states.flatten(0, 1)
+            # # Flatten B and L to ensure different augmentation per sample (B*L, 3, H, W)
+            # states_flatten = states.flatten(0, 1)
 
-            def _apply_aug(x):
-                return self.config.contrastive_augments(x)
+            # def _apply_aug(x):
+            #     return self.config.contrastive_augments(x)
 
-            aug1_flat = torch.stack([_apply_aug(x) for x in states_flatten], dim=0)
-            aug2_flat = torch.stack([_apply_aug(x) for x in states_flatten], dim=0)
+            # aug1_flat = torch.stack([_apply_aug(x) for x in states_flatten], dim=0)
+            # aug2_flat = torch.stack([_apply_aug(x) for x in states_flatten], dim=0)
 
-            aug1 = aug1_flat.view(B, L, *states.shape[2:])
-            aug2 = aug2_flat.view(B, L, *states.shape[2:])
+            # aug1 = aug1_flat.view(B, L, *states.shape[2:])
+            # aug2 = aug2_flat.view(B, L, *states.shape[2:])
 
-            # === 2. Encode both augmented sequences ===
-            enc1 = self.encoder_network(aug1)
-            enc2 = self.encoder_network(aug2)
+            # # === 2. Encode both augmented sequences ===
+            # enc1 = self.encoder_network(aug1)
+            # enc2 = self.encoder_network(aug2)
 
-            # === 3. Extract per-timestep features from RSSM ===
-            posts1, _ = self.rssm.observe(enc1, prev_actions=actions, is_firsts=is_firsts)
-            posts2, _ = self.rssm.observe(enc2, prev_actions=actions, is_firsts=is_firsts)
-            feats1 = self.rssm.get_feat(posts1)  # (B, L, D)
-            feats2 = self.rssm.get_feat(posts2)  # (B, L, D)
+            # # === 3. Extract per-timestep features from RSSM ===
+            # posts1, _ = self.rssm.observe(enc1, prev_actions=actions, is_firsts=is_firsts)
+            # posts2, _ = self.rssm.observe(enc2, prev_actions=actions, is_firsts=is_firsts)
+            # feats1 = self.rssm.get_feat(posts1)  # (B, L, D)
+            # feats2 = self.rssm.get_feat(posts2)  # (B, L, D)
 
-            # === 4. Pass through contrastive network(s) ===
-            feats1, feats2 = self.contrastive_network[0](
-                feats1=feats1,
-                feats2=feats2,
-            )
+            # # === 4. Pass through contrastive network(s) ===
+            # feats1, feats2 = self.contrastive_network[0](
+            #     feats1=feats1,
+            #     feats2=feats2,
+            # )
 
-            # === 5. Compute temporal contrastive loss ===
-            info_nce_loss, acc_con = self.compute_temporal_contrastive_loss(
-                feats1, feats2, window=self.config.get("contrastive_window", 0)
-            )
+            # # === 5. Compute temporal contrastive loss ===
+            # info_nce_loss, acc_con = self.compute_temporal_contrastive_loss(
+            #     feats1, feats2, window=self.config.get("contrastive_window", 0)
+            # )
 
-            self.add_loss(
-                name="model_contrastive",
-                loss=info_nce_loss,
-                weight=self.config.loss_contrastive_scale
-            )
-            self.add_metric("acc_con", acc_con)
+            # self.add_loss(
+            #     name="model_contrastive",
+            #     loss=info_nce_loss,
+            #     weight=self.config.loss_contrastive_scale
+            # )
+            # self.add_metric("acc_con", acc_con)
             ###############################################################################
             # Model Reconstruction Loss
             ###############################################################################
