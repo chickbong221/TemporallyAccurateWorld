@@ -24,7 +24,7 @@ epoch_length = model.config.epoch_length
 
 # Callback Path
 if os.environ.get("run_name", False):
-    callback_path = "callbacks/{}/{}_small_temporal_dis_0.3".format(os.environ["run_name"], env_name)
+    callback_path = "callbacks/{}/{}_temporal_order_0.5_bigTrans_correct".format(os.environ["run_name"], env_name)
 else:
     callback_path = "callbacks/{}".format(env_name)
 
@@ -40,4 +40,3 @@ model.set_replay_buffer(training_dataset)
 
 # Evaluation Dataset
 evaluation_dataset = nnet.datasets.VoidDataset(num_steps=model.config.eval_episodes)
-print(evaluation_dataset.batch_size)

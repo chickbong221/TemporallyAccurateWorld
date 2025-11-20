@@ -15,7 +15,7 @@ class TemporalOrderDiscriminator(nn.Module):
         
         # Limit number of permutations to max_perms
         self.num_perm = min(total_perms, max_perms)
-        print(f"self.num_perm: {self.num_perm}")
+        # print(f"self.num_perm: {self.num_perm}")
         self.selected_perms = set()
 
         while len(self.selected_perms) < self.num_perm:

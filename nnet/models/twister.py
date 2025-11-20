@@ -183,7 +183,7 @@ class TWISTER(models.Model):
         self.config.adversarial_num_heads = 8
         self.config.adversarial_num_layers = 2
         self.config.adversarial_max_perms = 1000
-        self.config.tod_scale = 0.1
+        self.config.tod_scale = 0.5
 
         # Sample Pre Fill Steps
         self.config.random_pre_fill_steps = True
@@ -295,20 +295,20 @@ class TWISTER(models.Model):
         #     dropout=0.1
         # )
 
-        self.temporal_order_discriminator = nn.ModuleList([twister_networks.TemporalOrderDiscriminator(
-            feat_dim=128,
-            window_size=w,
-            hidden_dim=128,
-            num_heads=8,
-            num_layers=2,
-            max_perms=1000
-        ) for w in self.config.window_size])
+        # self.temporal_order_discriminator = nn.ModuleList([twister_networks.TemporalOrderDiscriminator(
+        #     feat_dim=256,
+        #     window_size=w,
+        #     hidden_dim=256,
+        #     num_heads=4,
+        #     num_layers=2,
+        #     max_perms=1000
+        # ) for w in self.config.window_size])
         
         def count_parameters(model_list):
             total_params = sum(p.numel() for model in model_list for p in model.parameters())
             print(f"Total parameters in ModuleList: {total_params:,}")
 
-        count_parameters(self.temporal_order_discriminator)
+        # count_parameters(self.temporal_order_discriminator)
 
         # Slow Moving Networks
         self.add_frozen("v_target", copy.deepcopy(self.value_network))
@@ -525,7 +525,7 @@ class TWISTER(models.Model):
         self.tod_optimizers = [
             torch.optim.Adam(
                 tod.parameters(),
-                lr=self.config.model_lr,
+                lr=1e-5,
                 betas=(0.5, 0.999),
                 eps=self.config.model_eps
             )
@@ -942,20 +942,37 @@ class TWISTER(models.Model):
                 logits_real = tod(windows_perm_real)
                 loss_tod_real = F.cross_entropy(logits_real, perm_ids_real)
 
+                # === Accuracy ===
+                with torch.no_grad():
+                    preds = logits_real.argmax(dim=1)
+                    acc = (preds == perm_ids_real).float().mean().item()
+
                 self.tod_optimizers[tod_idx].zero_grad(set_to_none=True)
                 loss_tod_real.backward()
                 self.tod_optimizers[tod_idx].step()
 
-                # === 5. Train RSSM to fool TOD (TOD frozen) ===
-                with torch.no_grad():
-                    logits_fake = tod(windows_perm_fake)
+                print(f"TOD Window {window_size} - Acc: {acc*100:.2f}%, Loss TOD Real: {loss_tod_real.item():.4f}")
 
-                loss_tod_rssm = F.cross_entropy(logits_fake, perm_ids_fake)
-                total_loss_tod_rssm += loss_tod_rssm
+                # === 5. Train RSSM to fool TOD (TOD frozen) ===
+                if self.model_step >= 20000:
+                    tod.eval()
+                    for p in tod.parameters():
+                        p.requires_grad = False
+
+                    logits_fake = tod(windows_perm_fake)
+                    loss_tod_rssm = F.cross_entropy(logits_fake, perm_ids_fake)
+
+                    for p in tod.parameters():
+                        p.requires_grad = True
+                    tod.train()
+                    
+                    # print("logits_fake.grad_fn:", logits_fake.grad_fn)
+                    total_loss_tod_rssm += loss_tod_rssm
 
 
             # === 6. Combine adversarial TOD loss into RSSM ===
-            if active_tods > 0:
+            if self.model_step >= 20000 and active_tods > 0:
+                print("ahihi")
                 avg_loss = total_loss_tod_rssm / active_tods
                 self.add_loss("model_temporal_order", avg_loss, weight=self.config.tod_scale)
 
