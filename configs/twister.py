@@ -24,7 +24,7 @@ epoch_length = model.config.epoch_length
 
 # Callback Path
 if os.environ.get("run_name", False):
-    callback_path = "callbacks/{}/{}_temporal_order_0.5_bigTrans_correct".format(os.environ["run_name"], env_name)
+    callback_path = "callbacks/{}/{}_temporal_multi_discriminator".format(os.environ["run_name"], env_name)
 else:
     callback_path = "callbacks/{}".format(env_name)
 
