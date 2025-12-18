@@ -1,6 +1,7 @@
 import nnet
 import os
 import json
+import time
 
 # Extract params from filename
 env_name = os.environ["env_name"]
@@ -24,7 +25,10 @@ epoch_length = model.config.epoch_length
 
 # Callback Path
 if os.environ.get("run_name", False):
-    callback_path = "callbacks/{}/{}_temporal_multi_discriminator_weaker".format(os.environ["run_name"], env_name)
+    callback_path = (
+    f"callbacks/{os.environ['run_name']}/"
+    f"{env_name}_temporal_multi_discriminator_{time.time()}"
+)
 else:
     callback_path = "callbacks/{}".format(env_name)
 
