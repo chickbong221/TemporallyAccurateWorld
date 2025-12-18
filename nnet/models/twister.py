@@ -179,7 +179,7 @@ class TWISTER(models.Model):
 
         # Adversarial
         self.config.window_size = [4, 16, 32]
-        self.config.num_seq_to_discriminate = 16
+        self.config.num_seq_to_discriminate = [16, 8, 4]
         self.config.adversarial_hidden_size = 256
         self.config.adversarial_num_heads = 8
         self.config.adversarial_num_layers = 2
@@ -282,13 +282,13 @@ class TWISTER(models.Model):
             num_mlp_layers=self.config.discount_layers,
             norm=self.config.norm
         )
-        self.contrastive_network = nn.ModuleList([twister_networks.ContrastiveNetwork(
-            feat_size=feat_size + t * self.env.num_actions,
-            embed_size=self.config.model_stoch_size * self.config.model_discrete,
-            hidden_size=self.config.contrastive_hidden_size,
-            out_size=self.config.contrastive_out_size,
-            num_layers=self.config.contrastive_layers
-        ) for t in range(self.config.contrastive_steps)])
+        # self.contrastive_network = nn.ModuleList([twister_networks.ContrastiveNetwork(
+        #     feat_size=feat_size + t * self.env.num_actions,
+        #     embed_size=self.config.model_stoch_size * self.config.model_discrete,
+        #     hidden_size=self.config.contrastive_hidden_size,
+        #     out_size=self.config.contrastive_out_size,
+        #     num_layers=self.config.contrastive_layers
+        # ) for t in range(self.config.contrastive_steps)])
 
         # self.discriminator_network = twister_networks.TemporalDiscriminator(
         #     num_layers=4,
@@ -297,7 +297,7 @@ class TWISTER(models.Model):
         # )
 
         self.discriminator_network = nn.ModuleList([twister_networks.TemporalDiscriminator(
-            num_layers=8,
+            num_layers=4,
             num_heads=8,
             dropout=0.1
         ) for w in self.config.window_size])
@@ -494,7 +494,7 @@ class TWISTER(models.Model):
     def compile(self):
         
         # Compile World Model
-        model_params = itertools.chain(self.encoder_network.parameters(), self.rssm.parameters(), self.reward_network.parameters(), self.decoder_network.parameters(), self.continue_network.parameters(), self.contrastive_network.parameters())
+        model_params = itertools.chain(self.encoder_network.parameters(), self.rssm.parameters(), self.reward_network.parameters(), self.decoder_network.parameters(), self.continue_network.parameters())
         self.world_model.compile(
             optimizer=optimizers.Adam(params=[
                 {"params": model_params, "lr": self.config.model_lr, "grad_max_norm": self.config.model_grad_max_norm, "eps": self.config.model_eps}, 
@@ -855,7 +855,7 @@ class TWISTER(models.Model):
             self.continue_network = self.outer.continue_network
             self.reward_network = self.outer.reward_network
             self.rssm = self.outer.rssm
-            self.contrastive_network = self.outer.contrastive_network
+            # self.contrastive_network = self.outer.contrastive_network
             self.discriminator_network = self.outer.discriminator_network
             # self.temporal_order_discriminator = self.outer.temporal_order_discriminator
 
@@ -1040,8 +1040,8 @@ class TWISTER(models.Model):
                 # world model tries to make D_fake large (realistic)
                 return -D_fake.mean()
 
-            # Start training discriminators earlier (e.g., at step 5000)
-            if self.model_step >= 5000:
+            # Start training discriminators earlier (e.g., at step 2000)
+            if self.model_step >= 1000:
                 real_latent = latent["stoch"].flatten(-2, -1).detach()  # [B, L, D]
                 fake_latent = priors["stoch"].flatten(-2, -1).detach()  # [B, L, D]
                 
@@ -1051,8 +1051,8 @@ class TWISTER(models.Model):
                 total_loss_G = 0.0
                 num_discriminators = len(self.config.window_size)
                 
-                for disc_idx, (discriminator, optimizer, window_size) in enumerate(
-                    zip(self.discriminator_network, self.discriminator_optimizers, self.config.window_size)
+                for disc_idx, (discriminator, optimizer, window_size, num_seq_to_discriminate) in enumerate(
+                    zip(self.discriminator_network, self.discriminator_optimizers, self.config.window_size, self.config.num_seq_to_discriminate)
                 ):
                     # Skip if sequence length is shorter than window size
                     if L < window_size:
@@ -1060,7 +1060,7 @@ class TWISTER(models.Model):
                     
                     # Number of possible windows per sequence
                     max_start = L - window_size
-                    num_samples = min(16, max_start + 1)  # Can't sample more than available positions
+                    num_samples = min(num_seq_to_discriminate, max_start + 1)  # Can't sample more than available positions
                     
                     # Sample starting positions for each sequence in batch
                     # [B, num_samples]
@@ -1104,8 +1104,8 @@ class TWISTER(models.Model):
                     
                     total_loss_D += loss_D.item()
                     
-                    # Only compute generator adversarial loss after step 20000
-                    if self.model_step >= 10000:
+                    # Only compute generator adversarial loss after step 2000
+                    if self.model_step >= 2000:
                         # Generator adversarial loss (using non-detached priors)
                         fake_windows_for_G = torch.stack([
                             torch.stack([
@@ -1120,8 +1120,8 @@ class TWISTER(models.Model):
                         
                         total_loss_G += loss_G
                 
-                # Add averaged generator loss only after step 10000
-                if self.model_step >= 10000 and num_discriminators > 0:
+                # Add averaged generator loss only after step 2000
+                if self.model_step >= 2000 and num_discriminators > 0:
                     avg_loss_G = total_loss_G / num_discriminators
                     self.add_loss("model_discriminator", avg_loss_G, weight=0.5)
             ###############################################################################
@@ -1657,70 +1657,6 @@ class TWISTER(models.Model):
             states_rec = self.decoder_network(posts["stoch"].flatten(-2, -1)).mode()
 
             ###############################################################################
-            # Contrastive branch (two augmentations per sequence) + sorted indices
-            ###############################################################################
-
-            B, L = states.shape[0], states.shape[1]
-            states_flatten = states.flatten(0, 1)  # (B*L, C, H, W)
-
-            # Create two independent augmentations per frame
-            aug1_flat = torch.stack(
-                [self.config.contrastive_augments(states_flatten[i]) for i in range(states_flatten.shape[0])],
-                dim=0
-            )
-            aug2_flat = torch.stack(
-                [self.config.contrastive_augments(states_flatten[i]) for i in range(states_flatten.shape[0])],
-                dim=0
-            )
-
-            # Reshape back to (B, L, C, H, W)
-            aug1 = aug1_flat.view(B, L, *states.shape[2:])
-            aug2 = aug2_flat.view(B, L, *states.shape[2:])
-
-            # Encode both augmented sequences through encoder -> RSSM.observe -> get_feat
-            enc1 = self.encoder_network(aug1)
-            enc2 = self.encoder_network(aug2)
-
-            posts1, _ = self.rssm.observe(
-                states=enc1,
-                prev_actions=actions,
-                is_firsts=is_firsts,
-                prev_state=None,
-                is_firsts_hidden=None,
-            )
-            posts2, _ = self.rssm.observe(
-                states=enc2,
-                prev_actions=actions,
-                is_firsts=is_firsts,
-                prev_state=None,
-                is_firsts_hidden=None,
-            )
-
-            feats1 = self.rssm.get_feat(posts1)  # (B, L, D)
-            feats2 = self.rssm.get_feat(posts2)  # (B, L, D)
-
-            # Optionally pass through projection head used by contrastive loss (if you have one)
-            if hasattr(self, "contrastive_proj") and self.contrastive_proj is not None:
-                feats1 = self.contrastive_proj(feats1)
-                feats2 = self.contrastive_proj(feats2)
-
-            # Flatten for similarity computation (B*L, D)
-            feats1_flat = feats1.reshape(B * L, -1)
-            feats2_flat = feats2.reshape(B * L, -1)
-
-            # L2 normalize (cosine similarity)
-            feats1_flat_n = F.normalize(feats1_flat, dim=-1)
-            feats2_flat_n = F.normalize(feats2_flat, dim=-1)
-
-            # similarity matrix (anchors = feats1, keys = feats2)
-            # shape (B*L, B*L)
-            temp = float(self.config.get("contrastive_temp", 0.1))
-            sim_matrix = (feats1_flat_n @ feats2_flat_n.T) / temp
-
-            # Sorted indices (descending similarity)
-            sorted_indices = torch.argsort(sim_matrix, dim=-1, descending=True)  # (B*L, B*L)
-
-            ###############################################################################
             # Imaginary (unchanged)
             ###############################################################################
 
@@ -1778,52 +1714,6 @@ class TWISTER(models.Model):
             # Log Image (main)
             fig = torchvision.utils.make_grid(outputs, nrow=self.config.L, normalize=False, scale_each=False).cpu()
             writer.add_image(tag, fig, step)
-
-            # Log Contrastive visualizations
-            # We'll visualize, for a set of random anchors, the anchor original frame + top-K and bottom-K matches from aug2.
-            states_orig_flat = states.flatten(start_dim=0, end_dim=1)    # (B*L, C, H, W)
-            states_aug1_flat = aug1_flat                                  # (B*L, C, H, W)
-            states_aug2_flat = aug2_flat                                  # (B*L, C, H, W)
-
-            contrastive_batch = min(10, sorted_indices.shape[0])         # how many anchors to visualize
-            contrastive_top_k = min(10, sorted_indices.shape[1])         # top-k to show
-            contrastive_bottom_k = min(10, sorted_indices.shape[1])
-
-            # sample anchors uniformly
-            rng = torch.randint(0, sorted_indices.shape[0], size=(contrastive_batch,))
-            for t_idx, anchor_idx in enumerate(rng):
-                anchor_idx = int(anchor_idx.item())
-                top_idxs = sorted_indices[anchor_idx, :contrastive_top_k].cpu()
-                bottom_idxs = sorted_indices[anchor_idx, -contrastive_bottom_k:].cpu()
-
-                # Anchor original + its two augmentations (for context)
-                anchor_original = states_orig_flat[anchor_idx:anchor_idx + 1].cpu()
-                anchor_aug1 = states_aug1_flat[anchor_idx:anchor_idx + 1].cpu()
-                anchor_aug2 = states_aug2_flat[anchor_idx:anchor_idx + 1].cpu()
-
-                # Top matches (from aug2)
-                top_matches = states_aug2_flat[top_idxs].cpu()  # (top_k, C, H, W)
-                bottom_matches = states_aug2_flat[bottom_idxs].cpu()
-
-                # Row 1: anchor original + top matches
-                row_top = torch.cat([anchor_original.repeat(contrastive_top_k + 1, 1, 1, 1), top_matches], dim=0) if False else torch.cat(
-                    [anchor_original, top_matches], dim=0
-                )
-
-                # Row 2: anchor augment1 + top matches
-                row_top_aug = torch.cat([anchor_aug1, top_matches], dim=0)
-
-                # Row 3: anchor augment2 + bottom matches
-                row_bottom = torch.cat([anchor_aug2, bottom_matches], dim=0)
-
-                # Stack rows vertically
-                # We want a grid with 3 rows: [orig+top], [aug1+top], [aug2+bottom]
-                row_combined = torch.cat([row_top, row_top_aug, row_bottom], dim=0)
-
-                # make_grid with nrow = 1 + top_k
-                nrow = 1 + contrastive_top_k
-                fig = torchvision.utils.make_grid(row_combined, nrow=nrow, normalize=True, scale_each=True).cpu()
-                writer.add_image(f"{tag}-contrastive-anchor-{t_idx}", fig, step)
 
         # Default Mode: restore training/eval mode
         self.train(mode=mode)

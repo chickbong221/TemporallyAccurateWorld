@@ -32,6 +32,29 @@ import wandb
 # Disable Warnings
 warnings.filterwarnings("ignore")
 
+def set_seed(seed: int = 42):
+    import os
+    import random
+    import numpy as np
+
+    # Python built-in
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+    # NumPy
+    np.random.seed(seed)
+
+    import torch
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+# Set Seed
+set_seed(42)
+
 def main(args):
 
     ###############################################################################
@@ -116,7 +139,7 @@ if __name__ == "__main__":
     parser.add_argument("--keep_last_k",                type=int,   default=3,                                                          help="Keep last k checkpoints")
 
     # Eval
-    parser.add_argument("--eval_period_epoch",          type=int,   default=5,                                                          help="Model evaluation every 'n' epochs")
+    parser.add_argument("--eval_period_epoch",          type=int,   default=1,                                                          help="Model evaluation every 'n' epochs")
     parser.add_argument("--eval_period_step",           type=int,   default=None,                                                       help="Model evaluation every 'n' steps")
 
     # Info
