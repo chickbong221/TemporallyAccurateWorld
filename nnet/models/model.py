@@ -641,7 +641,7 @@ class Model(modules.Module):
         # Init wandb
         if callback_path is not None and wandb_logging:
             try:
-                wandb.init(project='nnet', sync_tensorboard=True, name=callback_path)
+                wandb.init(project='nnet', sync_tensorboard=True, name=callback_path, resume=False, reinit=True)
             except Exception as e:
                 print(str(e))
 
