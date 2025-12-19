@@ -7,8 +7,8 @@ class TemporalDiscriminator(nn.Module):
     
     def __init__(self,
                  dim_real=1024,
-                 proj_dim=128,
-                 hidden_dim=192,
+                 proj_dim=192,
+                 hidden_dim=256,
                  num_layers=1,
                  num_heads=4,
                  dropout=0.1):
