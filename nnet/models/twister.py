@@ -179,12 +179,12 @@ class TWISTER(models.Model):
 
         # Adversarial
         self.config.window_size = [4, 16, 32]
-        self.config.num_seq_to_discriminate = [16, 8, 4]
-        self.config.adversarial_hidden_size = 256
-        self.config.adversarial_num_heads = 8
-        self.config.adversarial_num_layers = 2
+        self.config.num_seq_to_discriminate = [8, 8, 4]
+        self.config.adversarial_hidden_dim = [192, 256, 384]
+        self.config.adversarial_proj_dim = [128, 192, 256]
+        self.config.adversarial_num_heads = [2, 4, 6]
+        self.config.adversarial_num_layers = [1, 1, 2]
         self.config.adversarial_max_perms = 1000
-        self.config.tod_scale = 0.5
 
         # Sample Pre Fill Steps
         self.config.random_pre_fill_steps = True
@@ -296,11 +296,16 @@ class TWISTER(models.Model):
         #     dropout=0.1
         # )
 
-        self.discriminator_network = nn.ModuleList([twister_networks.TemporalDiscriminator(
-            num_layers=4,
-            num_heads=4,
-            dropout=0.1
-        ) for w in self.config.window_size])
+        self.discriminator_network = nn.ModuleList([
+            twister_networks.TemporalDiscriminator(
+                proj_dim=self.config.adversarial_proj_dim[i],
+                hidden_dim=self.config.adversarial_hidden_dim[i],
+                num_layers=self.config.adversarial_num_layers[i],
+                num_heads=self.config.adversarial_num_heads[i],
+                dropout=0.05,
+            )
+            for i in range(len(self.config.window_size))
+        ])
 
         # self.temporal_order_discriminator = nn.ModuleList([twister_networks.TemporalOrderDiscriminator(
         #     feat_dim=256,
@@ -1118,9 +1123,10 @@ class TWISTER(models.Model):
                         
                         total_loss_G += loss_G
                 
+                self.add_info("average_discriminator_loss", total_loss_D / num_discriminators)
                 if self.model_step >= 11000 and num_discriminators > 0:
                     avg_loss_G = total_loss_G / num_discriminators
-                    self.add_loss("model_discriminator", avg_loss_G, weight=0.3)
+                    self.add_loss("discriminator", avg_loss_G, weight=0.3)
             ###############################################################################
             # Model Contrastive Loss
             ###############################################################################

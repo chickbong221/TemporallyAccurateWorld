@@ -10,8 +10,8 @@ class TemporalDiscriminator(nn.Module):
                  proj_dim=192,
                  hidden_dim=256,
                  num_layers=1,
-                 num_heads=4,
-                 dropout=0.1):
+                 num_heads=1,
+                 dropout=0.05):
         super().__init__()
 
         # 1) Small projection
