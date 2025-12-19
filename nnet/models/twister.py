@@ -532,7 +532,7 @@ class TWISTER(models.Model):
         self.discriminator_optimizers = [
             torch.optim.Adam(
                 discriminator.parameters(),
-                lr=3e-4,
+                lr=2e-4,
                 betas=(0.5, 0.999),
                 eps=self.config.model_eps
             )
@@ -1041,7 +1041,7 @@ class TWISTER(models.Model):
                 return -D_fake.mean()
 
             # Start training discriminators earlier (e.g., at step 2000)
-            if self.model_step >= 3000:
+            if self.model_step >= 10000:
                 real_latent = latent["stoch"].flatten(-2, -1).detach()  # [B, L, D]
                 fake_latent = priors["stoch"].flatten(-2, -1).detach()  # [B, L, D]
                 
@@ -1105,7 +1105,7 @@ class TWISTER(models.Model):
                     total_loss_D += loss_D.item()
                     
                     # Only compute generator adversarial loss after step 2000
-                    if self.model_step >= 3300:
+                    if self.model_step >= 10000:
                         # Generator adversarial loss (using non-detached priors)
                         fake_windows_for_G = torch.stack([
                             torch.stack([
@@ -1121,9 +1121,9 @@ class TWISTER(models.Model):
                         total_loss_G += loss_G
                 
                 # Add averaged generator loss only after step 2000
-                if self.model_step >= 3300 and num_discriminators > 0:
+                if self.model_step >= 10000 and num_discriminators > 0:
                     avg_loss_G = total_loss_G / num_discriminators
-                    self.add_loss("model_discriminator", avg_loss_G, weight=0.2)
+                    self.add_loss("model_discriminator", avg_loss_G, weight=0.3)
             ###############################################################################
             # Model Contrastive Loss
             ###############################################################################

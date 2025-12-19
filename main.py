@@ -32,7 +32,7 @@ import wandb
 # Disable Warnings
 warnings.filterwarnings("ignore")
 
-def set_seed(seed: int = 42):
+def set_seed(seed: int = 1):
     import os
     import random
     import numpy as np
