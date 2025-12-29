@@ -461,7 +461,7 @@ class TWISTER(models.Model):
         obs_reset = self.env.reset()
         self.episode_history = AttrDict(
             ep_step=torch.zeros(self.config.num_envs), # (N,)
-            hidden=(self.rssm.initial(batch_size=self.config.num_envs, seq_length=1, dtype=torch.float32, detach_learned=True), torch.zeros(self.config.num_envs, self.env.num_actions, dtype=torch.float32)), 
+            hidden=(self.rssm.initial(batch_size=self.config.num_envs, seq_length=2, dtype=torch.float32, detach_learned=True), torch.zeros(self.config.num_envs, self.env.num_actions, dtype=torch.float32)), 
             state=obs_reset.state,
             episodes=[AttrDict(
                 states=[obs_reset.state[env_i]],
@@ -598,7 +598,9 @@ class TWISTER(models.Model):
 
             # Generate is_firsts_hidden for forward
             if prev_latent["hidden"] != None:
-                is_firsts_hidden = torch.zeros(self.config.num_envs, self.rssm.get_hidden_len(prev_latent["hidden"]), dtype=torch.float32, device=action.device)
+                is_firsts_hidden = torch.zeros(self.config.num_envs, 
+                                            self.rssm.get_hidden_len(prev_latent["hidden"]), 
+                                            dtype=torch.float32, device=action.device)
                 for env_i in range(self.config.num_envs):
                     env_i_length = len(self.episode_history.episodes[env_i].is_firsts) - 1
                     if 0 < env_i_length <= is_firsts_hidden.shape[1]:
@@ -607,23 +609,39 @@ class TWISTER(models.Model):
                 is_firsts_hidden = None
 
             # RSSM (B, 1, ...)
+            # Note: prev_latent already contains 2 timesteps from initialization
             latent, _ = self.rssm(
                 states=latent, 
                 prev_states=prev_latent, 
                 prev_actions=action.unsqueeze(dim=1), 
-                is_firsts=torch.tensor([1.0 if len(self.episode_history.episodes[env_i].is_firsts) == 1 else 0.0 for env_i in range(self.config.num_envs)], dtype=torch.float32, device=action.device).unsqueeze(dim=1),
+                is_firsts=torch.tensor([1.0 if len(self.episode_history.episodes[env_i].is_firsts) == 1 
+                                    else 0.0 for env_i in range(self.config.num_envs)], 
+                                    dtype=torch.float32, device=action.device).unsqueeze(dim=1),
                 is_firsts_hidden=is_firsts_hidden
             )
 
-            # Get feat (B, Dfeat)
+            # Get feat (B, Dfeat) - use the most recent timestep
             feat = self.rssm.get_feat(latent).squeeze(dim=1)
 
             # Policy Sample
             action = self.policy_network(feat).sample().cpu()
 
-        # Update Hidden
-        latent["hidden"] = self.rssm.slice_hidden(latent["hidden"])
-        hidden = (latent, action)
+        # Update Hidden - maintain 2-timestep window for motion
+        # Shift window: drop oldest, keep recent, add new
+        latent_for_hidden = {}
+        for key in latent.keys():
+            if key == "hidden":
+                latent_for_hidden[key] = self.rssm.slice_hidden(latent[key])
+            else:
+                # Create 2-timestep window: [prev_latent's recent, new latent]
+                # prev_latent has shape (B, 2, ...), we take index 1 (most recent)
+                # new latent has shape (B, 1, ...), we concatenate them
+                latent_for_hidden[key] = torch.cat([
+                    prev_latent[key][:, -1:],  # Most recent from previous
+                    latent[key]  # New latent
+                ], dim=1)  # Result: (B, 2, ...)
+        
+        hidden = (latent_for_hidden, action)
 
         # Clip Action
         if not self.config.policy_discrete:
@@ -646,6 +664,7 @@ class TWISTER(models.Model):
         self.episode_history.state = obs.state
         self.episode_history.hidden = hidden
         self.episode_history.ep_step += self.env.action_repeat
+        
         # Update History Episodes
         for env_i in range(self.config.num_envs):
             if not obs.error[env_i]:
@@ -699,14 +718,16 @@ class TWISTER(models.Model):
                 # Reset Episode Step
                 self.episode_history.ep_step[env_i] = 0
 
-                # Reset Hidden
-                latent = self.rssm.initial(batch_size=1, dtype=torch.float32, detach_learned=True)
+                # Reset Hidden - Initialize with 2 timesteps for motion
+                latent = self.rssm.initial(batch_size=1, seq_length=2, 
+                                        dtype=torch.float32, detach_learned=True)
                 action = torch.zeros(self.env.num_actions, dtype=torch.float32)
                 self.episode_history.hidden[1][env_i] = action
+                
                 for key in self.episode_history.hidden[0]:
-
                     # Do not reset hidden
                     if key != "hidden":
+                        # latent has shape (1, 2, ...), we need to extract it properly
                         self.episode_history.hidden[0][key][env_i] = latent[key].squeeze(dim=0)
 
                 # Reset Env
@@ -1108,7 +1129,7 @@ class TWISTER(models.Model):
                     
                     total_loss_D += loss_D.item()
                     
-                    if self.model_step >= 11000:
+                    if self.model_step >= 12000:
                         # Generator adversarial loss (using non-detached priors)
                         fake_windows_for_G = torch.stack([
                             torch.stack([
@@ -1124,7 +1145,7 @@ class TWISTER(models.Model):
                         total_loss_G += loss_G
                 
                 self.add_info("average_discriminator_loss", total_loss_D / num_discriminators)
-                if self.model_step >= 11000 and num_discriminators > 0:
+                if self.model_step >= 12000 and num_discriminators > 0:
                     avg_loss_G = total_loss_G / num_discriminators
                     self.add_loss("discriminator", avg_loss_G, weight=0.3)
             ###############################################################################
@@ -1207,36 +1228,64 @@ class TWISTER(models.Model):
             # Flatten and Detach Posts
             ###############################################################################
 
+            # Prepare stoch pairs for motion: (B, L, 2, stoch_size, discrete) or (B, L, 2, stoch_size)
+            if self.config.discrete:
+                # posts["stoch"] shape: (B, L, stoch_size, discrete)
+                stoch_pairs = torch.stack([
+                    # For t=0, use initial state as z_{t-1}
+                    torch.cat([
+                        self.rssm.initial(B, 1, posts["stoch"].dtype, posts["stoch"].device)["stoch"],
+                        posts["stoch"][:, :-1]
+                    ], dim=1),  # z_{t-1}: (B, L, stoch_size, discrete)
+                    posts["stoch"]  # z_t: (B, L, stoch_size, discrete)
+                ], dim=2)  # (B, L, 2, stoch_size, discrete)
+            else:
+                # posts["stoch"] shape: (B, L, stoch_size)
+                stoch_pairs = torch.stack([
+                    torch.cat([
+                        self.rssm.initial(B, 1, posts["stoch"].dtype, posts["stoch"].device)["stoch"],
+                        posts["stoch"][:, :-1]
+                    ], dim=1),  # z_{t-1}: (B, L, stoch_size)
+                    posts["stoch"]  # z_t: (B, L, stoch_size)
+                ], dim=2)  # (B, L, 2, stoch_size)
+
             # K, V: (B, C+L, D) -> (B*L, C, D)
             hidden_flatten = [
                 (
                     # Key (B*L, C, D)
                     torch.stack([
-
                         # Padd hidden if not enough left context (B, C, D)
                         torch.cat([
                             # Zero Padding to reach length (C,): max(0, L+C-1-t - len(h))
-                            hidden_blk[0].new_zeros(hidden_blk[0].shape[0], max(0, self.config.L+self.config.att_context_left-1-t - hidden_blk[0].shape[1]), hidden_blk[0].shape[2]), 
+                            hidden_blk[0].new_zeros(
+                                hidden_blk[0].shape[0], 
+                                max(0, self.config.L + self.config.att_context_left - 1 - t - hidden_blk[0].shape[1]), 
+                                hidden_blk[0].shape[2]
+                            ), 
                             # hidden [-L+t+1 - C:-L+t+1]
-                            hidden_blk[0][:, max(0, hidden_blk[0].shape[1]-self.config.L+t+1 - self.config.att_context_left):hidden_blk[0].shape[1]-self.config.L+t+1]
+                            hidden_blk[0][:, max(0, hidden_blk[0].shape[1] - self.config.L + t + 1 - self.config.att_context_left):
+                                            hidden_blk[0].shape[1] - self.config.L + t + 1]
                         ], dim=1) 
-
-                    for t in range(0, self.config.L)], dim=1).flatten(start_dim=0, end_dim=1).detach(), # (B, L, C, D) -> (B*L, C, D)
+                    for t in range(0, self.config.L)], dim=1).flatten(start_dim=0, end_dim=1).detach(), 
 
                     # Value (B*L, C, D)
                     torch.stack([
-
                         # Padd hidden if not enough left context (B, C, D)
                         torch.cat([
                             # zeros max(0, L+C-1-t - len(h))
-                            hidden_blk[1].new_zeros(hidden_blk[1].shape[0], max(0, self.config.L+self.config.att_context_left-1-t - hidden_blk[1].shape[1]), hidden_blk[1].shape[2]), 
+                            hidden_blk[1].new_zeros(
+                                hidden_blk[1].shape[0], 
+                                max(0, self.config.L + self.config.att_context_left - 1 - t - hidden_blk[1].shape[1]), 
+                                hidden_blk[1].shape[2]
+                            ), 
                             # hidden [-L+t+1 - C:-L+t+1]
-                            hidden_blk[1][:, max(0, hidden_blk[1].shape[1]-self.config.L+t+1 - self.config.att_context_left):hidden_blk[1].shape[1]-self.config.L+t+1]
+                            hidden_blk[1][:, max(0, hidden_blk[1].shape[1] - self.config.L + t + 1 - self.config.att_context_left):
+                                            hidden_blk[1].shape[1] - self.config.L + t + 1]
                         ], dim=1) 
-
-                    for t in range(0, self.config.L)], dim=1).flatten(start_dim=0, end_dim=1).detach(), # (B, L, C, D) -> (B*L, C, D)
+                    for t in range(0, self.config.L)], dim=1).flatten(start_dim=0, end_dim=1).detach(),
                 )
-            for hidden_blk in posts["hidden"]]
+                for hidden_blk in posts["hidden"]
+            ]
 
             # is_firsts flatten (B, L) -> (B*L, 1), will result in masking hidden if true
             self.outer.detached_is_firsts = is_firsts.flatten(start_dim=0, end_dim=1).unsqueeze(dim=1).detach()
@@ -1245,17 +1294,29 @@ class TWISTER(models.Model):
             self.outer.detached_is_firsts_hidden = torch.stack([
                 torch.cat([
                     # Zero Padding to reach length (C,): max(0, L+C-1-t - len(h))
-                    is_firsts_hidden_concat.new_zeros(is_firsts_hidden_concat.shape[0], max(0, self.config.L+self.config.att_context_left-1-t - is_firsts_hidden_concat.shape[1])),  
+                    is_firsts_hidden_concat.new_zeros(
+                        is_firsts_hidden_concat.shape[0], 
+                        max(0, self.config.L + self.config.att_context_left - 1 - t - is_firsts_hidden_concat.shape[1])
+                    ),  
                     # set first element to True in order to mask padding (1,)
                     is_firsts_hidden_concat.new_ones(is_firsts_hidden_concat.shape[0], 1),
                     # is_firsts [t-C + 1:t]
-                    is_firsts_hidden_concat[:, max(0, is_firsts_hidden_concat.shape[1]-self.config.L+t+1-self.config.att_context_left):is_firsts_hidden_concat.shape[1]-self.config.L+t]
+                    is_firsts_hidden_concat[:, max(0, is_firsts_hidden_concat.shape[1] - self.config.L + t + 1 - self.config.att_context_left):
+                                            is_firsts_hidden_concat.shape[1] - self.config.L + t]
                 ], dim=1) 
-            for t in range(0, self.config.L)], dim=1).flatten(start_dim=0, end_dim=1).detach()
+                for t in range(0, self.config.L)
+            ], dim=1).flatten(start_dim=0, end_dim=1).detach()
 
-            # Flatten and detach post (B, L, D) -> (B*L, 1, D) = (B', 1, D)
-            self.outer.detached_posts = {k: hidden_flatten if k == "hidden" else v.flatten(start_dim=0, end_dim=1).unsqueeze(dim=1).detach() for k, v in posts.items()}
-
+            # Flatten and detach post with motion pairs (B, L, D) -> (B*L, 1 or 2, D) = (B', 1 or 2, D)
+            self.outer.detached_posts = {
+                k: hidden_flatten if k == "hidden" 
+                else (
+                    # For stoch, we need to flatten the pairs: (B, L, 2, ...) -> (B*L, 2, ...)
+                    v.flatten(start_dim=0, end_dim=1).detach() if k == "stoch" and len(v.shape) > 3
+                    else v.flatten(start_dim=0, end_dim=1).unsqueeze(dim=1).detach()
+                )
+                for k, v in {**posts, "stoch": stoch_pairs}.items()
+            }
             return outputs
         
     class ActorModel(models.Model):
@@ -1539,7 +1600,7 @@ class TWISTER(models.Model):
 
         # Transfer to device
         state = self.transfer_to_device(obs.state)
-        prev_latent = self.transfer_to_device(self.rssm.initial(batch_size=1, seq_length=1, dtype=obs.reward.dtype, detach_learned=True))
+        prev_latent = self.transfer_to_device(self.rssm.initial(batch_size=1, seq_length=2, dtype=obs.reward.dtype, detach_learned=True))
         prev_action = self.transfer_to_device(torch.zeros(1, self.env.num_actions, dtype=obs.reward.dtype))
 
         # Create hidden
@@ -1587,9 +1648,22 @@ class TWISTER(models.Model):
                 # Policy
                 action = self.policy_network(feat).mode()
 
-            # Update Hidden
-            latent["hidden"] = self.rssm.slice_hidden(latent["hidden"])
-            hidden = (latent, action)
+            # Update Hidden - maintain 2-timestep window for motion
+            # Shift window: drop oldest, keep recent, add new
+            latent_for_hidden = {}
+            for key in latent.keys():
+                if key == "hidden":
+                    latent_for_hidden[key] = self.rssm.slice_hidden(latent[key])
+                else:
+                    # Create 2-timestep window: [prev_latent's recent, new latent]
+                    # prev_latent has shape (B, 2, ...), we take index 1 (most recent)
+                    # new latent has shape (B, 1, ...), we concatenate them
+                    latent_for_hidden[key] = torch.cat([
+                        prev_latent[key][:, -1:],  # Most recent from previous
+                        latent[key]  # New latent
+                    ], dim=1)  # Result: (B, 2, ...)
+            
+            hidden = (latent_for_hidden, action)
 
             # Forward Env
             obs = self.env_eval.step(action.argmax(dim=-1).squeeze(dim=0) if self.config.policy_discrete else action.squeeze(dim=0))
@@ -1660,23 +1734,46 @@ class TWISTER(models.Model):
             states_rec = self.decoder_network(posts["stoch"].flatten(-2, -1)).mode()
 
             ###############################################################################
-            # Imaginary (unchanged)
+            # Imaginary (modified for 2-timestep motion computation)
             ###############################################################################
 
             # Initial State
             if self.config.log_figure_context_frames == 0:
-                # No context, No hidden
-                prev_state = self.transfer_to_device(
-                    self.rssm.initial(batch_size=feats.shape[0], seq_length=1, dtype=feats.dtype)
+                # No context: Need 2 initial states for motion computation
+                initial_state = self.transfer_to_device(
+                    self.rssm.initial(batch_size=feats.shape[0], seq_length=2, dtype=feats.dtype)
                 )
-            else:
-                # context + hidden
+                prev_state = initial_state
+            elif self.config.log_figure_context_frames == 1:
+                # Only 1 context frame: duplicate it to create 2-timestep window
                 hidden_len = self.rssm.get_hidden_len(posts["hidden"])
-                prev_state = {k: [
-                    (
-                        v_blk[0][:, max(0, hidden_len - self.config.L + self.config.log_figure_context_frames - self.config.att_context_left):hidden_len - self.config.L + self.config.log_figure_context_frames],
-                        v_blk[1][:, max(0, hidden_len - self.config.L + self.config.log_figure_context_frames - self.config.att_context_left):hidden_len - self.config.L + self.config.log_figure_context_frames]
-                    ) for v_blk in v] if k == "hidden" else v[:, self.config.log_figure_context_frames - 1:self.config.log_figure_context_frames] for k, v in posts.items()
+                prev_state = {
+                    k: [
+                        (
+                            v_blk[0][:, max(0, hidden_len - self.config.L):hidden_len - self.config.L + 1],
+                            v_blk[1][:, max(0, hidden_len - self.config.L):hidden_len - self.config.L + 1]
+                        ) for v_blk in v
+                    ] if k == "hidden" else (
+                        v[:, 0:1].repeat(1, 2, *([1] * (v.dim() - 2))) if k == "stoch" 
+                        else v[:, 0:1]
+                    ) for k, v in posts.items()
+                }
+            else:
+                # 2+ context frames: use last 2 frames for motion computation
+                context_start = self.config.log_figure_context_frames - 2
+                context_end = self.config.log_figure_context_frames
+                hidden_len = self.rssm.get_hidden_len(posts["hidden"])
+                
+                prev_state = {
+                    k: [
+                        (
+                            v_blk[0][:, max(0, hidden_len - self.config.L + context_start - self.config.att_context_left):hidden_len - self.config.L + context_end],
+                            v_blk[1][:, max(0, hidden_len - self.config.L + context_start - self.config.att_context_left):hidden_len - self.config.L + context_end]
+                        ) for v_blk in v
+                    ] if k == "hidden" else (
+                        v[:, context_start:context_end] if k == "stoch"
+                        else v[:, context_end - 1:context_end]
+                    ) for k, v in posts.items()
                 }
 
             # Model Imagine (B, 1+L-C, D)
@@ -1689,10 +1786,20 @@ class TWISTER(models.Model):
             )
 
             # Img States (B, L, ...)
-            states_img = self.decoder_network(
-                torch.cat([posts["stoch"][:, :self.config.log_figure_context_frames].flatten(-2, -1),
-                        img_states["stoch"][:, 1:].flatten(-2, -1)], dim=1)
-            ).mode()
+            # Note: img_states["stoch"] now starts with the most recent context state
+            if self.config.log_figure_context_frames == 0:
+                # No context: use all imagined states (skip the initial duplicated state)
+                states_img = self.decoder_network(
+                    img_states["stoch"][:, 1:].flatten(-2, -1)
+                ).mode()
+            else:
+                # With context: combine context frames with imagined states
+                states_img = self.decoder_network(
+                    torch.cat([
+                        posts["stoch"][:, :self.config.log_figure_context_frames].flatten(-2, -1),
+                        img_states["stoch"][:, 1:].flatten(-2, -1)
+                    ], dim=1)
+                ).mode()
 
         # Shift to 0..1 for display
         states_shift = states.clip(-0.5, 0.5) + 0.5
@@ -1703,7 +1810,7 @@ class TWISTER(models.Model):
         # Expand is_firsts
         is_firsts = is_firsts.unsqueeze(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1).expand_as(states) * states_shift
 
-        # Concat Outputs (same as before)
+        # Concat Outputs
         outputs = torch.concat([
             is_firsts,
             states_shift,

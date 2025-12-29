@@ -1,79 +1,3 @@
-# Copyright 2025, Maxime Burchi.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# PyTorch
-import torch
-import torch.nn as nn
-
-# NeuralNets
-from nnet import modules
-from nnet import distributions
-from nnet import structs
-
-class TSSM(nn.Module):
-
-    def __init__(
-            self, 
-            num_actions,
-            stoch_size=32, 
-            act_fun=nn.SiLU,
-            discrete=32, 
-            learn_initial=True, 
-            weight_init="dreamerv3_normal", 
-            bias_init="zeros", 
-            norm={"class": "LayerNorm", "params": {"eps": 1e-3}}, 
-            uniform_mix=0.01, 
-            action_clip=1.0, 
-            dist_weight_init="xavier_uniform", 
-            dist_bias_init="zeros",
-
-            # Transformer
-            hidden_size=1024,
-            num_blocks=4,
-            ff_ratio=4,
-            num_heads=16,
-            drop_rate=0.1,
-            att_context_left=64,
-            module_pre_norm=False,
-            motion_type="difference",  # ["difference", "correlation", "frequency"]
-            freq_keep_ratio=0.25,      # for frequency decomposition
-        ):
-        super(TSSM, self).__init__()
-
-        # Params
-        self.num_actions = num_actions
-        self.stoch_size = stoch_size
-        self.act_fun = act_fun
-        self.discrete = discrete
-        self.learn_initial = learn_initial
-        self.weight_init = weight_init
-        self.bias_init = bias_init
-        self.norm = norm
-        self.uniform_mix = uniform_mix
-        self.action_clip = action_clip
-        self.dist_weight_init = dist_weight_init
-        self.dist_bias_init = dist_bias_init
-
-        # Transformer
-        self.hidden_size = hidden_size
-        self.num_blocks = num_blocks
-        self.ff_ratio = ff_ratio
-        self.num_heads = num_heads
-        self.drop_rate = drop_rate
-        self.att_context_left = att_context_left
-        self.max_pos_encoding = 2048
-
         # Motion Extractor
         self.motion_type = motion_type
         self.freq_keep_ratio = freq_keep_ratio
@@ -464,14 +388,12 @@ class TSSM(nn.Module):
         # (B, 1 or L)
         assert is_firsts.dim() == 2
 
-        B, L, _ = prev_actions.shape
-
         # Clip Action (B, L, D) -c:+c
         if self.action_clip > 0.0:
             prev_actions *= (self.action_clip / torch.clip(torch.abs(prev_actions), min=self.action_clip)).detach()
 
         # Create right context mask (B, 1, L, Th+L)
-        mask = modules.return_mask(seq_len=L, 
+        mask = modules.return_mask(seq_len=prev_actions.shape[1], 
                                 hidden_len=self.get_hidden_len(prev_states["hidden"]), 
                                 left_context=self.att_context_left, right_context=0, 
                                 dtype=prev_actions.dtype, device=prev_actions.device)
@@ -479,38 +401,41 @@ class TSSM(nn.Module):
         # 1: Reset First States and Actions
         # 2: Update mask to mask pre is_first positions
         if is_firsts.any():
+            # Unsqueeze is_firsts (B, L, 1)
+            is_firsts = is_firsts.unsqueeze(dim=-1)
+
+            # Reset first Actions
+            prev_actions *= (1.0 - is_firsts)
+
+            # Reset first States (B, L, ...)
+            init_state = self.initial(batch_size=prev_actions.shape[0], seq_length=prev_actions.shape[1], 
+                                    dtype=prev_actions.dtype, device=prev_actions.device)
+            for key, value in prev_states.items():
+                # Hidden does not need reset, auto masked
+                if key == "hidden":
+                    prev_states[key] = value
+                # Reset first States 
+                else:
+                    is_firsts_r = torch.reshape(is_firsts, is_firsts.shape + (1,) * (len(value.shape) - len(is_firsts.shape)))
+                    prev_states[key] = value * (1.0 - is_firsts_r) + init_state[key] * is_firsts_r
+
             # Mask positions of past trajectories # (B, 1, L, Th+L)
             is_firts_mask = modules.return_is_firsts_mask(is_firsts.squeeze(dim=-1), is_firsts_hidden=is_firsts_hidden)
             mask = mask.minimum(is_firts_mask)
 
-        # prev_states["stoch"]: (B, L+1, ...)
-        stoch_tm2 = prev_states["stoch"][:, :-1]   # z_{t-2}
-        stoch_tm1 = prev_states["stoch"][:, 1:]    # z_{t-1}
-
+        # Flatten current and previous stoch for motion computation
         if self.discrete:
-            stoch_tm2 = stoch_tm2.flatten(start_dim=-2, end_dim=-1)
-            stoch_tm1 = stoch_tm1.flatten(start_dim=-2, end_dim=-1)
+            stoch_current = states["stoch"].flatten(start_dim=-2, end_dim=-1)
+            stoch_prev = prev_states["stoch"].flatten(start_dim=-2, end_dim=-1)
+        else:
+            stoch_current = states["stoch"]
+            stoch_prev = prev_states["stoch"]
 
-        # Compute motion betw een current and previous states
-        motion = self.compute_motion(stoch_tm1, stoch_tm2)
-
-        if is_firsts.any():
-            # Mask for t (episode start)
-            is_first_t = is_firsts
-
-            # Mask for t+1 (step after start)
-            is_first_tp1 = torch.zeros_like(is_firsts)
-            is_first_tp1[:, 1:] = is_firsts[:, :-1]
-
-            # Combined mask
-            zero_mask = (is_first_t | is_first_tp1).unsqueeze(-1)  # (B, L, 1)
-
-            # Zero motion and actions
-            motion = motion * (1.0 - zero_mask)
-            prev_actions = prev_actions * (1.0 - zero_mask)
+        # Compute motion between current and previous states
+        motion = self.compute_motion(stoch_current, stoch_prev)
 
         # Mix motion with action: motion ⊕ action
-        motion_action = self.motion_action_mixer(torch.cat([motion, prev_actions], dim=-1))
+        motion_action = self.motion_action_mixer(torch.concat([motion, prev_actions], dim=-1))
 
         # Transformer processes motion: motion_action -> m_t
         outputs = self.transformer(motion_action, hidden=prev_states["hidden"], mask=mask, 
@@ -526,7 +451,7 @@ class TSSM(nn.Module):
             add_out_dict["blocks_deter"] = outputs.blocks_x
 
         # Fuse m_t with z_{t-1}: [m_t ⊕ z_{t-1}]
-        fused = self.dynamics_fusion(torch.concat([m_t, stoch_tm1], dim=-1))
+        fused = self.dynamics_fusion(torch.concat([m_t, stoch_prev], dim=-1))
 
         # Predict prior z_t distribution
         logits_prior = self.dynamics_predictor(fused).reshape(fused.shape[:-1] + (self.stoch_size, self.discrete))
