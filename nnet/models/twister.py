@@ -41,7 +41,7 @@ class TWISTER(models.Model):
         model_sizes = {
             "S": AttrDict({
                 "dim_cnn": 32,
-                "hidden_size": 512,
+                "hidden_size": 128,
                 "num_layers": 2,
 
                 "stoch_size": 32,
@@ -1229,7 +1229,7 @@ class TWISTER(models.Model):
             ###############################################################################
 
             # Prepare stoch pairs for motion: (B, L, 2, stoch_size, discrete) or (B, L, 2, stoch_size)
-            if self.config.discrete:
+            if self.config.model_discrete:
                 # posts["stoch"] shape: (B, L, stoch_size, discrete)
                 stoch_pairs = torch.stack([
                     # For t=0, use initial state as z_{t-1}

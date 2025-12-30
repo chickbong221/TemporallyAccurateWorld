@@ -96,7 +96,7 @@ class TSSM(nn.Module):
         # Project motion + action to hidden_size for transformer
         self.motion_action_mixer = modules.MultiLayerPerceptron(
             dim_input=motion_dim + self.num_actions,
-            dim_layers=[self.hidden_size, self.hidden_size],
+            dim_layers=[self.hidden_size*2, self.hidden_size],
             act_fun=[self.act_fun, None],
             weight_init=self.weight_init,
             bias_init=self.bias_init,
@@ -405,17 +405,15 @@ class TSSM(nn.Module):
 
         # Flatten stoch size and discrete size to get z_{t-1} and z_t
         if self.discrete:
-            # prev_states["stoch"] shape: (B, 2, stoch_size, discrete)
-            stoch_prev = prev_states["stoch"][:, 0].flatten(start_dim=-2, end_dim=-1)  # z_{t-1}
-            stoch_current = prev_states["stoch"][:, 1].flatten(start_dim=-2, end_dim=-1)  # z_t
+            stoch_prev = prev_states["stoch"][:, 0:1].flatten(start_dim=-2, end_dim=-1)
+            stoch_current = prev_states["stoch"][:, 1:2].flatten(start_dim=-2, end_dim=-1)
         else:
-            # prev_states["stoch"] shape: (B, 2, stoch_size)
-            stoch_prev = prev_states["stoch"][:, 0]  # z_{t-1}
-            stoch_current = prev_states["stoch"][:, 1]  # z_t
+            stoch_prev = prev_states["stoch"][:, 0:1]      # (B, 1, stoch_size)
+            stoch_current = prev_states["stoch"][:, 1:2]   # (B, 1, stoch_size)
 
         # Compute motion: z_t vs z_{t-1}
         motion = self.compute_motion(stoch_current, stoch_prev)
-
+ 
         # Mix motion with action: motion ⊕ action
         motion_action = self.motion_action_mixer(torch.concat([motion, prev_actions], dim=-1))
 
@@ -479,6 +477,10 @@ class TSSM(nn.Module):
         # 1: Reset First States and Actions
         # 2: Update mask to mask pre is_first positions
         if is_firsts.any():
+
+            # Unsqueeze is_firsts (B, L, 1)
+            is_firsts = is_firsts.unsqueeze(dim=-1)
+
             # Mask positions of past trajectories # (B, 1, L, Th+L)
             is_firts_mask = modules.return_is_firsts_mask(is_firsts.squeeze(dim=-1), is_firsts_hidden=is_firsts_hidden)
             mask = mask.minimum(is_firts_mask)
@@ -503,7 +505,8 @@ class TSSM(nn.Module):
             is_first_tp1[:, 1:] = is_firsts[:, :-1]
 
             # Combined mask
-            zero_mask = (is_first_t | is_first_tp1).unsqueeze(-1)  # (B, L, 1)
+            zero_mask = torch.logical_or(is_first_t.bool(), is_first_tp1.bool())
+            zero_mask = zero_mask.float()
 
             # Zero motion and actions
             motion = motion * (1.0 - zero_mask)
