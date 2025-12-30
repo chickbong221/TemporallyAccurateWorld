@@ -41,7 +41,7 @@ class TWISTER(models.Model):
         model_sizes = {
             "S": AttrDict({
                 "dim_cnn": 32,
-                "hidden_size": 128,
+                "hidden_size": 256,
                 "num_layers": 2,
 
                 "stoch_size": 32,
