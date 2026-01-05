@@ -435,7 +435,8 @@ class TSSM(nn.Module):
             add_out_dict["blocks_deter"] = outputs.blocks_x
 
         # Fuse m_t with z_{t-1}: [m_t ⊕ z_{t-1}]
-        fused = self.dynamics_fusion(torch.concat([m_t, stoch_prev], dim=-1))
+        # fused = self.dynamics_fusion(torch.concat([m_t, stoch_prev], dim=-1))
+        fused = m_t
 
         # Predict z_t distribution
         logits = self.dynamics_predictor(fused).reshape(fused.shape[:-1] + (self.stoch_size, self.discrete))

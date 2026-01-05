@@ -41,7 +41,7 @@ class TWISTER(models.Model):
         model_sizes = {
             "S": AttrDict({
                 "dim_cnn": 32,
-                "hidden_size": 256,
+                "hidden_size": 512,
                 "num_layers": 2,
 
                 "stoch_size": 32,
@@ -178,8 +178,8 @@ class TWISTER(models.Model):
         self.config.contrastive_layers = 2
 
         # Adversarial
-        self.config.window_size = [4, 16, 32]
-        self.config.num_seq_to_discriminate = [8, 8, 4]
+        self.config.window_size = [4, 16]
+        self.config.num_seq_to_discriminate = [32, 32]
         self.config.adversarial_hidden_dim = [192, 256, 384]
         self.config.adversarial_proj_dim = [128, 192, 256]
         self.config.adversarial_num_heads = [2, 4, 6]
