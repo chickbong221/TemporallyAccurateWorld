@@ -178,8 +178,8 @@ class TWISTER(models.Model):
         self.config.contrastive_layers = 2
 
         # Adversarial
-        self.config.window_size = [4, 16]
-        self.config.num_seq_to_discriminate = [32, 32]
+        self.config.window_size = [4, 16, 32]
+        self.config.num_seq_to_discriminate = [8, 8, 4]
         self.config.adversarial_hidden_dim = [192, 256, 384]
         self.config.adversarial_proj_dim = [128, 192, 256]
         self.config.adversarial_num_heads = [2, 4, 6]
@@ -1056,98 +1056,98 @@ class TWISTER(models.Model):
             # Model Multiple Discriminator Losses
             ###############################################################################
 
-            def discriminator_loss(D_real, D_fake):
-                # real -> +1, fake -> -1
-                loss_real = F.relu(1.0 - D_real).mean()
-                loss_fake = F.relu(1.0 + D_fake).mean()
-                return 0.5 * (loss_real + loss_fake)
+            # def discriminator_loss(D_real, D_fake):
+            #     # real -> +1, fake -> -1
+            #     loss_real = F.relu(1.0 - D_real).mean()
+            #     loss_fake = F.relu(1.0 + D_fake).mean()
+            #     return 0.5 * (loss_real + loss_fake)
 
-            def world_model_adv_loss(D_fake):
-                # world model tries to make D_fake large (realistic)
-                return -D_fake.mean()
+            # def world_model_adv_loss(D_fake):
+            #     # world model tries to make D_fake large (realistic)
+            #     return -D_fake.mean()
 
-            if self.model_step >= 10000:
-                real_latent = latent["stoch"].flatten(-2, -1).detach()  # [B, L, D]
-                fake_latent = priors["stoch"].flatten(-2, -1).detach()  # [B, L, D]
+            # if self.model_step >= 10000:
+            #     real_latent = latent["stoch"].flatten(-2, -1).detach()  # [B, L, D]
+            #     fake_latent = priors["stoch"].flatten(-2, -1).detach()  # [B, L, D]
                 
-                B, L, D = real_latent.shape
+            #     B, L, D = real_latent.shape
                 
-                total_loss_D = 0.0
-                total_loss_G = 0.0
-                num_discriminators = len(self.config.window_size)
+            #     total_loss_D = 0.0
+            #     total_loss_G = 0.0
+            #     num_discriminators = len(self.config.window_size)
                 
-                for disc_idx, (discriminator, optimizer, window_size, num_seq_to_discriminate) in enumerate(
-                    zip(self.discriminator_network, self.discriminator_optimizers, self.config.window_size, self.config.num_seq_to_discriminate)
-                ):
-                    # Skip if sequence length is shorter than window size
-                    if L < window_size:
-                        continue
+            #     for disc_idx, (discriminator, optimizer, window_size, num_seq_to_discriminate) in enumerate(
+            #         zip(self.discriminator_network, self.discriminator_optimizers, self.config.window_size, self.config.num_seq_to_discriminate)
+            #     ):
+            #         # Skip if sequence length is shorter than window size
+            #         if L < window_size:
+            #             continue
                     
-                    # Number of possible windows per sequence
-                    max_start = L - window_size
-                    num_samples = min(num_seq_to_discriminate, max_start + 1)  # Can't sample more than available positions
+            #         # Number of possible windows per sequence
+            #         max_start = L - window_size
+            #         num_samples = min(num_seq_to_discriminate, max_start + 1)  # Can't sample more than available positions
                     
-                    # Sample starting positions for each sequence in batch
-                    # [B, num_samples]
-                    start_positions = torch.stack([
-                        torch.randperm(max_start + 1, device=real_latent.device)[:num_samples]
-                        for _ in range(B)
-                    ])
+            #         # Sample starting positions for each sequence in batch
+            #         # [B, num_samples]
+            #         start_positions = torch.stack([
+            #             torch.randperm(max_start + 1, device=real_latent.device)[:num_samples]
+            #             for _ in range(B)
+            #         ])
                     
-                    # Extract windows: [B, num_samples, window_size, D]
-                    real_windows = torch.stack([
-                        torch.stack([
-                            real_latent[b, start:start+window_size, :]
-                            for start in start_positions[b]
-                        ])
-                        for b in range(B)
-                    ])
+            #         # Extract windows: [B, num_samples, window_size, D]
+            #         real_windows = torch.stack([
+            #             torch.stack([
+            #                 real_latent[b, start:start+window_size, :]
+            #                 for start in start_positions[b]
+            #             ])
+            #             for b in range(B)
+            #         ])
                     
-                    fake_windows = torch.stack([
-                        torch.stack([
-                            fake_latent[b, start:start+window_size, :]
-                            for start in start_positions[b]
-                        ])
-                        for b in range(B)
-                    ])
+            #         fake_windows = torch.stack([
+            #             torch.stack([
+            #                 fake_latent[b, start:start+window_size, :]
+            #                 for start in start_positions[b]
+            #             ])
+            #             for b in range(B)
+            #         ])
                     
-                    # Reshape to [B*num_samples, window_size, D]
-                    real_windows = real_windows.view(B * num_samples, window_size, D)
-                    fake_windows = fake_windows.view(B * num_samples, window_size, D)
+            #         # Reshape to [B*num_samples, window_size, D]
+            #         real_windows = real_windows.view(B * num_samples, window_size, D)
+            #         fake_windows = fake_windows.view(B * num_samples, window_size, D)
                     
-                    # Forward pass through discriminator
-                    D_real = discriminator(real_windows)  # [B*num_samples]
-                    D_fake = discriminator(fake_windows)  # [B*num_samples]
+            #         # Forward pass through discriminator
+            #         D_real = discriminator(real_windows)  # [B*num_samples]
+            #         D_fake = discriminator(fake_windows)  # [B*num_samples]
                     
-                    # Discriminator loss
-                    loss_D = discriminator_loss(D_real, D_fake)
+            #         # Discriminator loss
+            #         loss_D = discriminator_loss(D_real, D_fake)
                     
-                    # Update discriminator
-                    optimizer.zero_grad(set_to_none=True)
-                    loss_D.backward()
-                    optimizer.step()
+            #         # Update discriminator
+            #         optimizer.zero_grad(set_to_none=True)
+            #         loss_D.backward()
+            #         optimizer.step()
                     
-                    total_loss_D += loss_D.item()
+            #         total_loss_D += loss_D.item()
                     
-                    if self.model_step >= 12000:
-                        # Generator adversarial loss (using non-detached priors)
-                        fake_windows_for_G = torch.stack([
-                            torch.stack([
-                                priors["stoch"].flatten(-2, -1)[b, start:start+window_size, :]
-                                for start in start_positions[b]
-                            ])
-                            for b in range(B)
-                        ]).view(B * num_samples, window_size, D)
+            #         if self.model_step >= 12000:
+            #             # Generator adversarial loss (using non-detached priors)
+            #             fake_windows_for_G = torch.stack([
+            #                 torch.stack([
+            #                     priors["stoch"].flatten(-2, -1)[b, start:start+window_size, :]
+            #                     for start in start_positions[b]
+            #                 ])
+            #                 for b in range(B)
+            #             ]).view(B * num_samples, window_size, D)
                         
-                        D_fake_for_G = discriminator(fake_windows_for_G)
-                        loss_G = world_model_adv_loss(D_fake_for_G)
+            #             D_fake_for_G = discriminator(fake_windows_for_G)
+            #             loss_G = world_model_adv_loss(D_fake_for_G)
                         
-                        total_loss_G += loss_G
+            #             total_loss_G += loss_G
                 
-                self.add_info("average_discriminator_loss", total_loss_D / num_discriminators)
-                if self.model_step >= 12000 and num_discriminators > 0:
-                    avg_loss_G = total_loss_G / num_discriminators
-                    self.add_loss("discriminator", avg_loss_G, weight=0.3)
+            #     self.add_info("average_discriminator_loss", total_loss_D / num_discriminators)
+            #     if self.model_step >= 12000 and num_discriminators > 0:
+            #         avg_loss_G = total_loss_G / num_discriminators
+            #         self.add_loss("discriminator", avg_loss_G, weight=0.3)
             ###############################################################################
             # Model Contrastive Loss
             ###############################################################################
