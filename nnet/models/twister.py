@@ -922,8 +922,8 @@ class TWISTER(models.Model):
                 return -D_fake.mean()
 
 
-            if self.model_step >= 15000:
-                real_latent = latent["stoch"].flatten(-2, -1).detach()   # [B, L, D]
+            if self.model_step >= 14000:
+                real_latent = latent["stoch"].flatten(-2, -1).detach()  # [B, L, D]
                 fake_latent = priors["stoch"].flatten(-2, -1).detach()
                 B, L, D = real_latent.shape
 
@@ -945,38 +945,56 @@ class TWISTER(models.Model):
                     # [B, K] random start indices
                     starts = torch.randint(0, max_start, (B, K), device=real_latent.device)
 
-                    # [B, K, W, D] → [B*K, W, D]
+                    # 100% correct extract_windows function
                     def extract_windows(x):
-                        idx = starts[..., None] + torch.arange(W, device=x.device)
-                        return x.gather(1, idx.unsqueeze(-1).expand(-1, -1, -1, D)).view(-1, W, D)
+                        """
+                        x: [B, L, D]
+                        returns: [B*K, W, D]
+                        """
+                        B, L, D = x.shape
+                        # idx: [B, K, W]
+                        idx = starts[..., None] + torch.arange(W, device=x.device)  # [B, K, W]
+                        idx = idx.clamp(0, L - 1)  # safety
 
+                        # Expand x to match idx shape for gather
+                        x_expanded = x.unsqueeze(1).expand(-1, K, -1, -1)  # [B, K, L, D]
+                        idx_expanded = idx.unsqueeze(-1).expand(-1, -1, -1, D)  # [B, K, W, D]
+
+                        # gather along sequence dimension (dim=2)
+                        windows = torch.gather(x_expanded, 2, idx_expanded)  # [B, K, W, D]
+                        return windows.reshape(-1, W, D)  # [B*K, W, D]
+
+                    # extract windows for real and fake latents
                     real_w = extract_windows(real_latent)
                     fake_w = extract_windows(fake_latent)
 
+                    # discriminator forward pass
                     D_real = disc(real_w)
                     D_fake = disc(fake_w)
 
+                    # discriminator loss
                     loss_D = discriminator_loss(D_real, D_fake)
                     opt.zero_grad(set_to_none=True)
                     loss_D.backward()
                     opt.step()
-
                     total_loss_D += loss_D.item()
 
-                    if self.model_step >= 17000:
+                    # generator adversarial loss
+                    if self.model_step >= 15000:
                         fake_w_G = extract_windows(priors["stoch"].flatten(-2, -1))
                         loss_G = world_model_adv_loss(disc(fake_w_G))
                         total_loss_G += loss_G
 
+                # log average discriminator loss
                 self.add_info("average_discriminator_loss", total_loss_D / num_discriminators)
 
-                if self.model_step >= 17000 and num_discriminators > 0:
+                # add adversarial loss to world model
+                if self.model_step >= 15000 and num_discriminators > 0:
                     self.add_loss(
                         "discriminator",
                         total_loss_G / num_discriminators,
                         weight=0.3,
                     )
-
             ###############################################################################
             # Model Reconstruction Loss
             ###############################################################################
