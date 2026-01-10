@@ -1,3 +1,17 @@
+# Copyright 2025, Maxime Burchi.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # PyTorch
 import torch
 import torch.nn as nn
@@ -117,16 +131,24 @@ class TSSM(nn.Module):
         )
 
         # Fuse motion transformer output (m_t) with previous stochastic latent (z_{t-1})
-        self.motion_rescale = modules.Linear(
-            in_features=self.hidden_size, 
-            out_features=self.discrete * self.stoch_size if self.discrete else 2 * self.stoch_size,
-            weight_init=self.dist_weight_init,
-            bias_init=self.dist_bias_init
+        self.dynamics_fusion = modules.MultiLayerPerceptron(
+            dim_input=self.hidden_size + (self.stoch_size * self.discrete if self.discrete else self.stoch_size),
+            dim_layers=[
+                self.hidden_size * 2,   # expansion
+                self.hidden_size        # bottleneck
+            ],
+            act_fun=[
+                self.act_fun,
+                self.act_fun
+            ],
+            weight_init=self.weight_init,
+            bias_init=self.bias_init,
+            norm=self.norm
         )
 
         # Dynamics Predictor: fused features -> z_t distribution
         self.dynamics_predictor = modules.Linear(
-            in_features=self.discrete * self.stoch_size if self.discrete else 2 * self.stoch_size, 
+            in_features=self.hidden_size, 
             out_features=self.discrete * self.stoch_size if self.discrete else 2 * self.stoch_size,
             weight_init=self.dist_weight_init,
             bias_init=self.dist_bias_init
@@ -221,13 +243,13 @@ class TSSM(nn.Module):
         initial_state = structs.AttrDict(
             logits=torch.zeros(batch_size, seq_length, self.stoch_size, self.discrete, dtype=dtype, device=device),
             stoch=torch.zeros(batch_size, seq_length, self.stoch_size, self.discrete, dtype=dtype, device=device),
-            deter=torch.zeros(batch_size, seq_length, self.stoch_size, self.discrete, dtype=dtype, device=device),
+            deter=torch.zeros(batch_size, seq_length, self.hidden_size, dtype=dtype, device=device),
             hidden=None
         )
 
         # Learned Initial
         if self.learn_initial:
-            initial_state.deter = self.weight_init.repeat(batch_size, seq_length, 2)
+            initial_state.deter = self.weight_init.repeat(batch_size, seq_length, 1)
             initial_state.stoch = self.get_stoch(initial_state.deter) 
 
             # Detach Learned
@@ -390,7 +412,7 @@ class TSSM(nn.Module):
             stoch_current = prev_states["stoch"][:, 1:2]   # (B, 1, stoch_size)
 
         # Compute motion: z_t vs z_{t-1}
-        motion = self.compute_motion(stoch_current.detach(), stoch_prev.detach())
+        motion = self.compute_motion(stoch_current, stoch_prev)
  
         # Mix motion with action: motion ⊕ action
         motion_action = self.motion_action_mixer(torch.concat([motion, prev_actions], dim=-1))
@@ -403,7 +425,7 @@ class TSSM(nn.Module):
         outputs = self.transformer(motion_action, hidden=prev_states["hidden"], mask=mask, 
                                 return_hidden=True, return_att_w=return_att_w, 
                                 return_blocks_x=return_blocks_deter)
-        motion_t, hidden = outputs.x, outputs.hidden
+        m_t, hidden = outputs.x, outputs.hidden
 
         # Additional Outputs
         add_out_dict = {}
@@ -412,8 +434,11 @@ class TSSM(nn.Module):
         if return_blocks_deter:
             add_out_dict["blocks_deter"] = outputs.blocks_x
 
-        motion_rescaled = self.motion_rescale(motion_t)
-        fused = stoch_current + motion_rescaled
+        # Fuse m_t with z_{t-1}: [m_t ⊕ z_{t-1}]
+        # fused = self.dynamics_fusion(torch.concat([m_t, stoch_prev], dim=-1))
+        print("m_t shape:", m_t.shape)
+        print("stoch_prev shape:", stoch_prev.shape)
+        fused = m_t
 
         # Predict z_t distribution
         logits = self.dynamics_predictor(fused).reshape(fused.shape[:-1] + (self.stoch_size, self.discrete))
@@ -464,15 +489,15 @@ class TSSM(nn.Module):
             mask = mask.minimum(is_firts_mask)
 
         # prev_states["stoch"]: (B, L+1, ...)
-        stoch_prev = prev_states["stoch"][:, :-1]   # z_{t-2}
-        stoch_current = prev_states["stoch"][:, 1:]    # z_{t-1}
+        stoch_tm2 = prev_states["stoch"][:, :-1]   # z_{t-2}
+        stoch_tm1 = prev_states["stoch"][:, 1:]    # z_{t-1}
 
         if self.discrete:
-            stoch_prev = stoch_prev.flatten(start_dim=-2, end_dim=-1)
-            stoch_current = stoch_current.flatten(start_dim=-2, end_dim=-1)
+            stoch_tm2 = stoch_tm2.flatten(start_dim=-2, end_dim=-1)
+            stoch_tm1 = stoch_tm1.flatten(start_dim=-2, end_dim=-1)
 
-        # Compute motion between current and previous states
-        motion = self.compute_motion(stoch_current.detach(), stoch_prev.detach())
+        # Compute motion betw een current and previous states
+        motion = self.compute_motion(stoch_tm1, stoch_tm2)
 
         if is_firsts.any():
             # Mask for t (episode start)
@@ -480,7 +505,7 @@ class TSSM(nn.Module):
 
             # Mask for t+1 (step after start)
             is_first_tp1 = torch.zeros_like(is_firsts)
-            # is_first_tp1[:, 1:] = is_firsts[:, :-1]
+            is_first_tp1[:, 1:] = is_firsts[:, :-1]
 
             # Combined mask
             zero_mask = torch.logical_or(is_first_t.bool(), is_first_tp1.bool())
@@ -497,7 +522,7 @@ class TSSM(nn.Module):
         outputs = self.transformer(motion_action, hidden=prev_states["hidden"], mask=mask, 
                                 return_hidden=True, return_att_w=return_att_w, 
                                 return_blocks_x=return_blocks_deter)
-        motion_t, hidden = outputs.x, outputs.hidden
+        m_t, hidden = outputs.x, outputs.hidden
 
         # Additional Outputs
         add_out_dict = {}
@@ -506,8 +531,11 @@ class TSSM(nn.Module):
         if return_blocks_deter:
             add_out_dict["blocks_deter"] = outputs.blocks_x
 
-        motion_rescaled = self.motion_rescale(motion_t)
-        fused = stoch_current + motion_rescaled
+        # Fuse m_t with z_{t-1}: [m_t ⊕ z_{t-1}]
+        fused = self.dynamics_fusion(torch.concat([m_t, stoch_tm1], dim=-1))
+        print("m_t.shape:", m_t.shape)
+        print(f"stoch_tm1.shape: {stoch_tm1.shape}")
+        print(f"fused.shape: {fused.shape}")
 
         # Predict prior z_t distribution
         logits_prior = self.dynamics_predictor(fused).reshape(fused.shape[:-1] + (self.stoch_size, self.discrete))

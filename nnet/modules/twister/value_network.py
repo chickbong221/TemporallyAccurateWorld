@@ -27,7 +27,7 @@ class ValueNetwork(nn.Module):
         hidden_size=512, 
         act_fun=nn.SiLU, 
         num_mlp_layers=2, 
-        feat_size=32*32+512, 
+        feat_size=32*32+1024, 
         weight_init="dreamerv3_normal", 
         bias_init="zeros", 
         norm={"class": "LayerNorm", "params": {"eps": 1e-3}}, 

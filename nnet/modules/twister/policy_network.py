@@ -29,7 +29,7 @@ class PolicyNetwork(nn.Module):
             hidden_size=512, 
             act_fun=nn.SiLU, 
             num_mlp_layers=5, 
-            feat_size=32*32+512, 
+            feat_size=32*32+1024, 
             discrete=False, 
             min_std=0.1, 
             max_std=1.0, 

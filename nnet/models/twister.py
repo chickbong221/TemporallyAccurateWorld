@@ -178,13 +178,12 @@ class TWISTER(models.Model):
         self.config.contrastive_layers = 2
 
         # Adversarial
-        self.config.window_size = [4, 16, 32]
-        self.config.num_seq_to_discriminate = [8, 8, 4]
+        self.config.window_size = [4, 16]
+        self.config.num_seq_to_discriminate = [16, 16]
         self.config.adversarial_hidden_dim = [192, 256, 384]
         self.config.adversarial_proj_dim = [128, 192, 256]
         self.config.adversarial_num_heads = [2, 4, 6]
         self.config.adversarial_num_layers = [1, 1, 2]
-        self.config.adversarial_max_perms = 1000
 
         # Sample Pre Fill Steps
         self.config.random_pre_fill_steps = True
@@ -227,7 +226,7 @@ class TWISTER(models.Model):
             self.env_eval = None
 
         # Networks
-        feat_size = self.config.model_stoch_size * self.config.model_discrete + self.config.model_hidden_size if self.config.model_discrete else self.config.model_stoch_size + self.config.model_hidden_size
+        feat_size = self.config.model_stoch_size * self.config.model_discrete * 2 if self.config.model_discrete else self.config.model_stoch_size + self.config.model_hidden_size
         self.encoder_network = twister_networks.EncoderNetwork(
             dim_input_cnn=self.config.image_channels, 
             dim_cnn=self.config.dim_cnn,
@@ -306,15 +305,6 @@ class TWISTER(models.Model):
             )
             for i in range(len(self.config.window_size))
         ])
-
-        # self.temporal_order_discriminator = nn.ModuleList([twister_networks.TemporalOrderDiscriminator(
-        #     feat_dim=256,
-        #     window_size=w,
-        #     hidden_dim=256,
-        #     num_heads=4,
-        #     num_layers=2,
-        #     max_perms=1000
-        # ) for w in self.config.window_size])
         
         def count_parameters(model_list):
             total_params = sum(p.numel() for model in model_list for p in model.parameters())
@@ -531,9 +521,7 @@ class TWISTER(models.Model):
             metrics=None,
             decoders=None
         )
-
-        # self.discriminator_network.opt_disc = torch.optim.Adam(self.discriminator_network.parameters(), lr=2e-4, betas=(0.5, 0.999))
-
+        
         self.discriminator_optimizers = [
             torch.optim.Adam(
                 discriminator.parameters(),
@@ -543,16 +531,6 @@ class TWISTER(models.Model):
             )
             for discriminator in self.discriminator_network
         ]
-
-        # self.tod_optimizers = [
-        #     torch.optim.Adam(
-        #         tod.parameters(),
-        #         lr=2e-4,
-        #         betas=(0.5, 0.999),
-        #         eps=self.config.model_eps
-        #     )
-        #     for tod in self.temporal_order_discriminator
-        # ]
 
         # Model Step
         self.model_step = self.world_model.optimizer.param_groups[0]["lr_scheduler"].model_step
@@ -931,266 +909,74 @@ class TWISTER(models.Model):
             discount_pred = self.continue_network(feats)
 
             ###############################################################################
-            # Model Temporal Loss
-            # Now the code try to identify particular temporal orders in sequences of features
-            # You can also make it realize if the window is consecutive or not
-            ###############################################################################
-
-            # # === 1. Extract real & fake features ===
-            # real_feats = latent["stoch"].flatten(-2, -1).detach()     # (B, L, D) real, no grad
-            # fake_feats = priors["stoch"].flatten(-2, -1)              # (B, L, D) fake, grad to RSSM
-
-            # B, L, D = real_feats.shape
-
-            # total_loss_tod_rssm = 0.0
-            # active_tods = 0
-
-            # for tod_idx, tod in enumerate(self.temporal_order_discriminator):
-            #     window_size = self.config.window_size[tod_idx]
-
-            #     if L < window_size:
-            #         continue  # Skip TODs whose window size is too large
-
-            #     active_tods += 1
-
-            #     # === 2. Extract all consecutive windows ===
-            #     num_windows = L - window_size + 1
-            #     total_samples = B * num_windows
-
-            #     # Build sliding windows efficiently (vectorized)
-            #     windows_real = torch.stack(
-            #         [real_feats[:, i:i+window_size] for i in range(num_windows)],
-            #         dim=1
-            #     ).reshape(total_samples, window_size, D)
-
-            #     windows_fake = torch.stack(
-            #         [fake_feats[:, i:i+window_size] for i in range(num_windows)],
-            #         dim=1
-            #     ).reshape(total_samples, window_size, D)
-
-            #     # === 3. Random permutation assignment ===
-            #     num_perms = tod.num_perm
-
-            #     # Real windows
-            #     perm_ids_real = torch.randint(0, num_perms, (total_samples,), device=real_feats.device)
-            #     perm_real_idx = tod.perm_indices[perm_ids_real]              # (N, window_size)
-            #     windows_perm_real = windows_real[torch.arange(total_samples).unsqueeze(-1), perm_real_idx]
-
-            #     # Fake windows
-            #     perm_ids_fake = torch.randint(0, num_perms, (total_samples,), device=fake_feats.device)
-            #     perm_fake_idx = tod.perm_indices[perm_ids_fake]
-            #     windows_perm_fake = windows_fake[torch.arange(total_samples).unsqueeze(-1), perm_fake_idx]
-
-            #     # === 4. Train TOD on real windows ===
-            #     logits_real = tod(windows_perm_real)
-            #     loss_tod_real = F.cross_entropy(logits_real, perm_ids_real)
-
-            #     # === Accuracy ===
-            #     with torch.no_grad():
-            #         preds = logits_real.argmax(dim=1)
-            #         acc = (preds == perm_ids_real).float().mean().item()
-
-            #     self.tod_optimizers[tod_idx].zero_grad(set_to_none=True)
-            #     loss_tod_real.backward()
-            #     self.tod_optimizers[tod_idx].step()
-
-            #     print(f"TOD Window {window_size} - Acc: {acc*100:.2f}%, Loss TOD Real: {loss_tod_real.item():.4f}")
-
-            #     # === 5. Train RSSM to fool TOD (TOD frozen) ===
-            #     if self.model_step >= 20000:
-            #         tod.eval()
-            #         for p in tod.parameters():
-            #             p.requires_grad = False
-
-            #         logits_fake = tod(windows_perm_fake)
-            #         loss_tod_rssm = F.cross_entropy(logits_fake, perm_ids_fake)
-
-            #         for p in tod.parameters():
-            #             p.requires_grad = True
-            #         tod.train()
-                    
-            #         # print("logits_fake.grad_fn:", logits_fake.grad_fn)
-            #         total_loss_tod_rssm += loss_tod_rssm
-
-
-            # # === 6. Combine adversarial TOD loss into RSSM ===
-            # if self.model_step >= 20000 and active_tods > 0:
-            #     print("ahihi")
-            #     avg_loss = total_loss_tod_rssm / active_tods
-            #     self.add_loss("model_temporal_order", avg_loss, weight=self.config.tod_scale)
-
-            ###############################################################################
-            # Model One Discriminator Loss
-            ###############################################################################
-
-            # def discriminator_loss(D_real, D_fake):
-            #     # real -> +1, fake -> -1
-            #     loss_real = F.relu(1.0 - D_real).mean()
-            #     loss_fake = F.relu(1.0 + D_fake).mean()
-            #     return 0.5 * (loss_real + loss_fake)
-
-            # def world_model_adv_loss(D_fake):
-            #     # world model tries to make D_fake large (realistic)
-            #     return -D_fake.mean()
-
-            # # print(self.model_step)
-            # if self.model_step >= 20000:
-            #     real_latent = latent["stoch"].flatten(-2, -1).detach()
-            #     fake_latent = priors["stoch"].flatten(-2, -1).detach()
-
-            #     # Discriminator
-            #     D_real = self.discriminator_network(real_latent)
-            #     D_fake = self.discriminator_network(fake_latent)
-
-            #     loss_D = discriminator_loss(D_real, D_fake)
-
-            #     # Update discriminator
-            #     self.discriminator_network.opt_disc.zero_grad(set_to_none=True)
-            #     loss_D.backward()
-            #     self.discriminator_network.opt_disc.step()
-
-            #     D_fake_for_G = self.discriminator_network(priors["stoch"].flatten(-2, -1))
-            #     self.add_loss("model_discriminator", world_model_adv_loss(D_fake_for_G), weight=0.3)
-            
-            ###############################################################################
             # Model Multiple Discriminator Losses
             ###############################################################################
 
-            # def discriminator_loss(D_real, D_fake):
-            #     # real -> +1, fake -> -1
-            #     loss_real = F.relu(1.0 - D_real).mean()
-            #     loss_fake = F.relu(1.0 + D_fake).mean()
-            #     return 0.5 * (loss_real + loss_fake)
+            def discriminator_loss(D_real, D_fake):
+                return 0.5 * (
+                    F.relu(1.0 - D_real).mean() +
+                    F.relu(1.0 + D_fake).mean()
+                )
 
-            # def world_model_adv_loss(D_fake):
-            #     # world model tries to make D_fake large (realistic)
-            #     return -D_fake.mean()
+            def world_model_adv_loss(D_fake):
+                return -D_fake.mean()
 
-            # if self.model_step >= 10000:
-            #     real_latent = latent["stoch"].flatten(-2, -1).detach()  # [B, L, D]
-            #     fake_latent = priors["stoch"].flatten(-2, -1).detach()  # [B, L, D]
-                
-            #     B, L, D = real_latent.shape
-                
-            #     total_loss_D = 0.0
-            #     total_loss_G = 0.0
-            #     num_discriminators = len(self.config.window_size)
-                
-            #     for disc_idx, (discriminator, optimizer, window_size, num_seq_to_discriminate) in enumerate(
-            #         zip(self.discriminator_network, self.discriminator_optimizers, self.config.window_size, self.config.num_seq_to_discriminate)
-            #     ):
-            #         # Skip if sequence length is shorter than window size
-            #         if L < window_size:
-            #             continue
-                    
-            #         # Number of possible windows per sequence
-            #         max_start = L - window_size
-            #         num_samples = min(num_seq_to_discriminate, max_start + 1)  # Can't sample more than available positions
-                    
-            #         # Sample starting positions for each sequence in batch
-            #         # [B, num_samples]
-            #         start_positions = torch.stack([
-            #             torch.randperm(max_start + 1, device=real_latent.device)[:num_samples]
-            #             for _ in range(B)
-            #         ])
-                    
-            #         # Extract windows: [B, num_samples, window_size, D]
-            #         real_windows = torch.stack([
-            #             torch.stack([
-            #                 real_latent[b, start:start+window_size, :]
-            #                 for start in start_positions[b]
-            #             ])
-            #             for b in range(B)
-            #         ])
-                    
-            #         fake_windows = torch.stack([
-            #             torch.stack([
-            #                 fake_latent[b, start:start+window_size, :]
-            #                 for start in start_positions[b]
-            #             ])
-            #             for b in range(B)
-            #         ])
-                    
-            #         # Reshape to [B*num_samples, window_size, D]
-            #         real_windows = real_windows.view(B * num_samples, window_size, D)
-            #         fake_windows = fake_windows.view(B * num_samples, window_size, D)
-                    
-            #         # Forward pass through discriminator
-            #         D_real = discriminator(real_windows)  # [B*num_samples]
-            #         D_fake = discriminator(fake_windows)  # [B*num_samples]
-                    
-            #         # Discriminator loss
-            #         loss_D = discriminator_loss(D_real, D_fake)
-                    
-            #         # Update discriminator
-            #         optimizer.zero_grad(set_to_none=True)
-            #         loss_D.backward()
-            #         optimizer.step()
-                    
-            #         total_loss_D += loss_D.item()
-                    
-            #         if self.model_step >= 12000:
-            #             # Generator adversarial loss (using non-detached priors)
-            #             fake_windows_for_G = torch.stack([
-            #                 torch.stack([
-            #                     priors["stoch"].flatten(-2, -1)[b, start:start+window_size, :]
-            #                     for start in start_positions[b]
-            #                 ])
-            #                 for b in range(B)
-            #             ]).view(B * num_samples, window_size, D)
-                        
-            #             D_fake_for_G = discriminator(fake_windows_for_G)
-            #             loss_G = world_model_adv_loss(D_fake_for_G)
-                        
-            #             total_loss_G += loss_G
-                
-            #     self.add_info("average_discriminator_loss", total_loss_D / num_discriminators)
-            #     if self.model_step >= 12000 and num_discriminators > 0:
-            #         avg_loss_G = total_loss_G / num_discriminators
-            #         self.add_loss("discriminator", avg_loss_G, weight=0.3)
-            ###############################################################################
-            # Model Contrastive Loss
-            ###############################################################################
 
-            # # Flatten B and L to ensure different augmentation per sample (B*L, 3, H, W)
-            # states_flatten = states.flatten(0, 1)
+            if self.model_step >= 15000:
+                real_latent = latent["stoch"].flatten(-2, -1).detach()   # [B, L, D]
+                fake_latent = priors["stoch"].flatten(-2, -1).detach()
+                B, L, D = real_latent.shape
 
-            # def _apply_aug(x):
-            #     return self.config.contrastive_augments(x)
+                total_loss_D, total_loss_G = 0.0, 0.0
+                num_discriminators = len(self.config.window_size)
 
-            # aug1_flat = torch.stack([_apply_aug(x) for x in states_flatten], dim=0)
-            # aug2_flat = torch.stack([_apply_aug(x) for x in states_flatten], dim=0)
+                for disc, opt, W, K in zip(
+                    self.discriminator_network,
+                    self.discriminator_optimizers,
+                    self.config.window_size,
+                    self.config.num_seq_to_discriminate,
+                ):
+                    if L < W:
+                        continue
 
-            # aug1 = aug1_flat.view(B, L, *states.shape[2:])
-            # aug2 = aug2_flat.view(B, L, *states.shape[2:])
+                    max_start = L - W + 1
+                    K = min(K, max_start)
 
-            # # === 2. Encode both augmented sequences ===
-            # enc1 = self.encoder_network(aug1)
-            # enc2 = self.encoder_network(aug2)
+                    # [B, K] random start indices
+                    starts = torch.randint(0, max_start, (B, K), device=real_latent.device)
 
-            # # === 3. Extract per-timestep features from RSSM ===
-            # posts1, _ = self.rssm.observe(enc1, prev_actions=actions, is_firsts=is_firsts)
-            # posts2, _ = self.rssm.observe(enc2, prev_actions=actions, is_firsts=is_firsts)
-            # feats1 = self.rssm.get_feat(posts1)  # (B, L, D)
-            # feats2 = self.rssm.get_feat(posts2)  # (B, L, D)
+                    # [B, K, W, D] → [B*K, W, D]
+                    def extract_windows(x):
+                        idx = starts[..., None] + torch.arange(W, device=x.device)
+                        return x.gather(1, idx.unsqueeze(-1).expand(-1, -1, -1, D)).view(-1, W, D)
 
-            # # === 4. Pass through contrastive network(s) ===
-            # feats1, feats2 = self.contrastive_network[0](
-            #     feats1=feats1,
-            #     feats2=feats2,
-            # )
+                    real_w = extract_windows(real_latent)
+                    fake_w = extract_windows(fake_latent)
 
-            # # === 5. Compute temporal contrastive loss ===
-            # info_nce_loss, acc_con = self.compute_temporal_contrastive_loss(
-            #     feats1, feats2, window=self.config.get("contrastive_window", 0)
-            # )
+                    D_real = disc(real_w)
+                    D_fake = disc(fake_w)
 
-            # self.add_loss(
-            #     name="model_contrastive",
-            #     loss=info_nce_loss,
-            #     weight=self.config.loss_contrastive_scale
-            # )
-            # self.add_metric("acc_con", acc_con)
+                    loss_D = discriminator_loss(D_real, D_fake)
+                    opt.zero_grad(set_to_none=True)
+                    loss_D.backward()
+                    opt.step()
+
+                    total_loss_D += loss_D.item()
+
+                    if self.model_step >= 17000:
+                        fake_w_G = extract_windows(priors["stoch"].flatten(-2, -1))
+                        loss_G = world_model_adv_loss(disc(fake_w_G))
+                        total_loss_G += loss_G
+
+                self.add_info("average_discriminator_loss", total_loss_D / num_discriminators)
+
+                if self.model_step >= 17000 and num_discriminators > 0:
+                    self.add_loss(
+                        "discriminator",
+                        total_loss_G / num_discriminators,
+                        weight=0.3,
+                    )
+
             ###############################################################################
             # Model Reconstruction Loss
             ###############################################################################
