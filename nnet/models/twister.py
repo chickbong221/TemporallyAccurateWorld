@@ -859,15 +859,12 @@ class TWISTER(models.Model):
             self.continue_network = self.outer.continue_network
             self.reward_network = self.outer.reward_network
             self.rssm = self.outer.rssm
-            # self.contrastive_network = self.outer.contrastive_network
             self.discriminator_network = self.outer.discriminator_network
-            # self.temporal_order_discriminator = self.outer.temporal_order_discriminator
 
         def __getattr__(self, name):
             return getattr(self.outer, name)
 
         def forward(self, inputs):
-
             # Unpack Inputs 
             states, actions, rewards, dones, is_firsts, model_steps = inputs
 
@@ -885,12 +882,13 @@ class TWISTER(models.Model):
             latent = self.encoder_network(states)
 
             # Model Observe (B, L, D)
-            posts, priors = self.rssm.observe(
+            posts, priors, action_contrast_outputs = self.rssm.observe(
                 states=latent, 
                 prev_actions=actions, 
                 is_firsts=is_firsts, 
                 prev_state=None, 
-                is_firsts_hidden=None
+                is_firsts_hidden=None,
+                compute_action_contrast=True
             )
 
             # Update Hidden States
@@ -1027,6 +1025,31 @@ class TWISTER(models.Model):
 
             # Model Discount Loss
             self.add_loss("model_discount", - discount_pred.log_prob((1.0 - dones).unsqueeze(dim=-1).detach()).mean(), self.config.loss_discount_scale)
+
+            ###############################################################################
+            # Action Contrastive Loss
+            ###############################################################################
+
+            if action_contrast_outputs is not None:
+                delta_z = action_contrast_outputs["delta_z"]
+                delta_z_contrast = action_contrast_outputs["delta_z_contrast"]
+                
+                # Compute contrastive loss: encourage different actions to produce different deltas
+                # Use cosine similarity to measure how different the deltas are
+                delta_z_flat = delta_z.flatten(start_dim=1)
+                delta_z_contrast_flat = delta_z_contrast.flatten(start_dim=1)
+                
+                # Normalize
+                delta_z_norm = F.normalize(delta_z_flat, dim=-1)
+                delta_z_contrast_norm = F.normalize(delta_z_contrast_flat, dim=-1)
+                
+                # Cosine similarity (we want this to be low, so different actions → different deltas)
+                cosine_sim = (delta_z_norm * delta_z_contrast_norm).sum(dim=-1)
+                
+                # Loss: minimize similarity (or maximize difference)
+                action_contrast_loss = cosine_sim.mean()
+                
+                self.add_loss("action_contrast", action_contrast_loss, weight=self.config.loss_action_contrast_scale)
 
             ###############################################################################
             # Flatten and Detach Posts

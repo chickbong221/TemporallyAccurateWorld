@@ -238,7 +238,7 @@ class TSSM(nn.Module):
         return initial_state
 
     def observe(self, states, prev_actions, is_firsts, prev_state=None, is_firsts_hidden=None, 
-            return_blocks_deter=False):
+            return_blocks_deter=False, compute_action_contrast=False):
         """
         Modified observe to initialize with 2 timesteps instead of 1.
         """
@@ -260,10 +260,13 @@ class TSSM(nn.Module):
         prev_states["hidden"] = prev_state["hidden"]
 
         # Forward Model (B, L, D)
-        posts, priors = self(states, prev_states, prev_actions, is_firsts, is_firsts_hidden, 
-                            return_blocks_deter=return_blocks_deter)
+        posts, priors, action_contrast_outputs = self(
+            states, prev_states, prev_actions, is_firsts, is_firsts_hidden, 
+            return_blocks_deter=return_blocks_deter,
+            compute_action_contrast=compute_action_contrast
+        )
 
-        return posts, priors
+        return posts, priors, action_contrast_outputs
 
     def imagine(self, p_net, prev_state, img_steps=1, is_firsts=None, is_firsts_hidden=None, actions=None):
         """
@@ -391,7 +394,7 @@ class TSSM(nn.Module):
 
         # Compute motion: z_t vs z_{t-1}
         motion = self.compute_motion(stoch_current.detach(), stoch_prev.detach())
- 
+
         # Mix motion with action: motion ⊕ action
         motion_action = self.motion_action_mixer(torch.concat([motion, prev_actions], dim=-1))
 
@@ -424,14 +427,14 @@ class TSSM(nn.Module):
 
         # Return Prior (deter now stores the fused representation)
         return {"stoch": stoch, "deter": fused, "hidden": hidden, **dist_params, **add_out_dict}
-    
+
     def forward_obs(self, deter, hidden, states):
         
         # Return Post
         return {"deter": deter, "hidden": hidden, **states}
 
     def forward(self, states, prev_states, prev_actions, is_firsts, is_firsts_hidden=None, 
-            return_att_w=False, return_blocks_deter=False):
+        return_att_w=False, return_blocks_deter=False, compute_action_contrast=False):
         """
         Forward pass that processes motion between consecutive states.
         """
@@ -455,7 +458,6 @@ class TSSM(nn.Module):
         # 1: Reset First States and Actions
         # 2: Update mask to mask pre is_first positions
         if is_firsts.any():
-
             # Unsqueeze is_firsts (B, L, 1)
             is_firsts = is_firsts.unsqueeze(dim=-1)
 
@@ -509,6 +511,38 @@ class TSSM(nn.Module):
         motion_rescaled = self.motion_rescale(motion_t)
         fused = stoch_current + motion_rescaled
 
+        ###############################################################################
+        # Action Contrastive Forward Pass
+        ###############################################################################
+        action_contrast_outputs = None
+        
+        if compute_action_contrast and self.training:
+            # Create contrast actions by shuffling batch dimension
+            batch_indices = torch.randperm(B, device=prev_actions.device)
+            contrast_actions = prev_actions[batch_indices]
+            
+            # Mix motion with contrast action
+            motion_action_contrast = self.motion_action_mixer(
+                torch.cat([motion.detach(), contrast_actions], dim=-1)
+            )
+            
+            # Forward through transformer with detached hidden states
+            outputs_contrast = self.transformer(
+                motion_action_contrast, 
+                hidden=[(h[0].detach(), h[1].detach()) for h in prev_states["hidden"]] if prev_states["hidden"] is not None else None,
+                mask=mask, 
+                return_hidden=False
+            )
+            
+            # Compute contrast delta
+            delta_z_contrast = self.motion_rescale(outputs_contrast.x)
+            
+            # Store outputs for loss computation
+            action_contrast_outputs = {
+                "delta_z": motion_rescaled,
+                "delta_z_contrast": delta_z_contrast
+            }
+
         # Predict prior z_t distribution
         logits_prior = self.dynamics_predictor(fused).reshape(fused.shape[:-1] + (self.stoch_size, self.discrete))
         
@@ -528,5 +562,5 @@ class TSSM(nn.Module):
         if return_blocks_deter:
             post["blocks_deter"] = prior["blocks_deter"]
 
-        # Return post and prior
-        return post, prior
+        # Return post, prior, and action contrast outputs
+        return post, prior, action_contrast_outputs
