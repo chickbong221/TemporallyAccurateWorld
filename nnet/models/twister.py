@@ -993,8 +993,8 @@ class TWISTER(models.Model):
                     self.add_loss(
                         "discriminator",
                         total_loss_G / num_discriminators,
-                        weight=0.3,
-                    )
+                        weight=0.3)
+                        
             ###############################################################################
             # Model Reconstruction Loss
             ###############################################################################
