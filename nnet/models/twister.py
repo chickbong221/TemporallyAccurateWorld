@@ -1458,7 +1458,7 @@ class TWISTER(models.Model):
                 latent = {key: value.unsqueeze(dim=1) for key, value in latent.items()}
 
                 # RSSM (B, 1, ...)
-                latent, _ = self.rssm(
+                latent, _, _ = self.rssm(
                     states=latent, 
                     prev_states=prev_latent,
                     prev_actions=prev_action.unsqueeze(dim=1), 
@@ -1547,7 +1547,7 @@ class TWISTER(models.Model):
             ###############################################################################
 
             # Model Observe (B, L, D)
-            posts, priors = self.rssm.observe(
+            posts, priors, _ = self.rssm.observe(
                 states=latent,
                 prev_actions=actions,
                 is_firsts=is_firsts,
