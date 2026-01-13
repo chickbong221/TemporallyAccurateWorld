@@ -158,7 +158,7 @@ class TWISTER(models.Model):
         self.config.loss_kl_prior_scale = 0.5
         self.config.loss_kl_post_scale = 0.1
         self.config.loss_contrastive_scale = 0.3
-        self.config.loss_action_contrast_scale = 0.1
+        self.config.loss_action_contrast_scale = 0.2
 
         # TSSM
         self.config.att_context_left = 8 # C must be <= L
@@ -589,7 +589,7 @@ class TWISTER(models.Model):
 
             # RSSM (B, 1, ...)
             # Note: prev_latent already contains 2 timesteps from initialization
-            latent, _ = self.rssm(
+            latent, _, _ = self.rssm(
                 states=latent, 
                 prev_states=prev_latent, 
                 prev_actions=action.unsqueeze(dim=1), 
