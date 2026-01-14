@@ -159,7 +159,7 @@ class TWISTER(models.Model):
         self.config.loss_kl_post_scale = 0.1
         self.config.loss_action_contrast_scale_start = 0.1
         self.config.loss_action_contrast_scale_end = 0.3
-        self.config.loss_adversarial_scale = 0.3
+        self.config.loss_adversarial_scale = 0.5
 
         # TSSM
         self.config.att_context_left = 8 # C must be <= L
@@ -181,7 +181,7 @@ class TWISTER(models.Model):
 
         # Adversarial
         self.config.window_size = [4, 16]
-        self.config.num_seq_to_discriminate = [32, 16]
+        self.config.num_seq_to_discriminate = [32, 32]
         self.config.adversarial_hidden_dim = [192, 256, 384]
         self.config.adversarial_proj_dim = [128, 192, 256]
         self.config.adversarial_num_heads = [2, 4, 6]
@@ -996,9 +996,19 @@ class TWISTER(models.Model):
                 # log average discriminator loss
                 self.add_info("average_discriminator_loss", total_loss_D / num_discriminators)
 
-                # add adversarial loss to world model
                 if num_discriminators > 0:
-                    self.add_loss("discriminator", total_loss_G / num_discriminators, weight=self.config.loss_adversarial_scale)
+                    
+                    start = 10_000
+                    end = 30_000
+
+                    if self.model_step <= start:
+                        adv_weight = 0.0
+                    elif self.model_step >= end:
+                        adv_weight = self.config.loss_adversarial_scale  # 0.5
+                    else:
+                        alpha = (self.model_step - start) / (end - start)
+                        adv_weight = alpha * self.config.loss_adversarial_scale
+                    self.add_loss("discriminator", total_loss_G / num_discriminators, weight=adv_weight)
                         
             ###############################################################################
             # Model Reconstruction Loss
