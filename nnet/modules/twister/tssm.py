@@ -228,7 +228,7 @@ class TSSM(nn.Module):
 
         # Learned Initial
         if self.learn_initial:
-            initial_state.deter = self.weight_init.repeat(batch_size, seq_length, 2)
+            initial_state.deter = self.weight_init.repeat(batch_size, seq_length, int(self.stoch_size*self.discrete/self.hidden_size))
             initial_state.stoch = self.get_stoch(initial_state.deter) 
 
             # Detach Learned

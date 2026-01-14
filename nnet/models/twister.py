@@ -41,7 +41,7 @@ class TWISTER(models.Model):
         model_sizes = {
             "S": AttrDict({
                 "dim_cnn": 32,
-                "hidden_size": 512,
+                "hidden_size": 256,
                 "num_layers": 2,
 
                 "stoch_size": 32,
@@ -157,8 +157,8 @@ class TWISTER(models.Model):
         self.config.loss_decoder_scale = 1.0
         self.config.loss_kl_prior_scale = 0.5
         self.config.loss_kl_post_scale = 0.1
-        self.config.loss_action_contrast_scale_start = 0.1
-        self.config.loss_action_contrast_scale_end = 0.3
+        self.config.loss_action_contrast_scale_start = 0.05
+        self.config.loss_action_contrast_scale_end = 0.2
         self.config.loss_adversarial_scale = 0.5
 
         # TSSM
