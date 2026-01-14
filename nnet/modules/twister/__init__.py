@@ -21,4 +21,3 @@ from .policy_network import PolicyNetwork
 from .value_network import ValueNetwork
 from .contrastive_network import ContrastiveNetwork
 from .temporal_discriminator import TemporalDiscriminator
-from .temporal_order_dis import TemporalOrderDiscriminator

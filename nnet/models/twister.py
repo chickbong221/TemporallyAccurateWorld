@@ -157,8 +157,9 @@ class TWISTER(models.Model):
         self.config.loss_decoder_scale = 1.0
         self.config.loss_kl_prior_scale = 0.5
         self.config.loss_kl_post_scale = 0.1
-        self.config.loss_contrastive_scale = 0.3
-        self.config.loss_action_contrast_scale = 0.2
+        self.config.loss_action_contrast_scale_start = 0.1
+        self.config.loss_action_contrast_scale_end = 0.3
+        self.config.loss_adversarial_scale = 0.3
 
         # TSSM
         self.config.att_context_left = 8 # C must be <= L
@@ -180,7 +181,7 @@ class TWISTER(models.Model):
 
         # Adversarial
         self.config.window_size = [4, 16]
-        self.config.num_seq_to_discriminate = [16, 16]
+        self.config.num_seq_to_discriminate = [32, 16]
         self.config.adversarial_hidden_dim = [192, 256, 384]
         self.config.adversarial_proj_dim = [128, 192, 256]
         self.config.adversarial_num_heads = [2, 4, 6]
@@ -526,7 +527,7 @@ class TWISTER(models.Model):
         self.discriminator_optimizers = [
             torch.optim.Adam(
                 discriminator.parameters(),
-                lr=2e-4,
+                lr=1e-4,
                 betas=(0.5, 0.999),
                 eps=self.config.model_eps
             )
@@ -883,14 +884,24 @@ class TWISTER(models.Model):
             latent = self.encoder_network(states)
 
             # Model Observe (B, L, D)
-            posts, priors, action_contrast_outputs = self.rssm.observe(
-                states=latent, 
-                prev_actions=actions, 
-                is_firsts=is_firsts, 
-                prev_state=None, 
-                is_firsts_hidden=None,
-                compute_action_contrast=True
-            )
+            if self.model_step >= 10000:
+                posts, priors, action_contrast_outputs = self.rssm.observe(
+                    states=latent, 
+                    prev_actions=actions, 
+                    is_firsts=is_firsts, 
+                    prev_state=None, 
+                    is_firsts_hidden=None,
+                    compute_action_contrast=True
+                )
+            else:
+                posts, priors, action_contrast_outputs = self.rssm.observe(
+                    states=latent, 
+                    prev_actions=actions, 
+                    is_firsts=is_firsts, 
+                    prev_state=None, 
+                    is_firsts_hidden=None,
+                    compute_action_contrast=False
+                )
 
             # Update Hidden States
             is_firsts_hidden_concat = is_firsts
@@ -921,7 +932,7 @@ class TWISTER(models.Model):
                 return -D_fake.mean()
 
 
-            if self.model_step >= 14000:
+            if self.model_step >= 10000:
                 real_latent = latent["stoch"].flatten(-2, -1).detach()  # [B, L, D]
                 fake_latent = priors["stoch"].flatten(-2, -1).detach()
                 B, L, D = real_latent.shape
@@ -978,21 +989,16 @@ class TWISTER(models.Model):
                     opt.step()
                     total_loss_D += loss_D.item()
 
-                    # generator adversarial loss
-                    if self.model_step >= 15000:
-                        fake_w_G = extract_windows(priors["stoch"].flatten(-2, -1))
-                        loss_G = world_model_adv_loss(disc(fake_w_G))
-                        total_loss_G += loss_G
+                    fake_w_G = extract_windows(priors["stoch"].flatten(-2, -1))
+                    loss_G = world_model_adv_loss(disc(fake_w_G))
+                    total_loss_G += loss_G
 
                 # log average discriminator loss
                 self.add_info("average_discriminator_loss", total_loss_D / num_discriminators)
 
                 # add adversarial loss to world model
-                if self.model_step >= 15000 and num_discriminators > 0:
-                    self.add_loss(
-                        "discriminator",
-                        total_loss_G / num_discriminators,
-                        weight=0.3)
+                if num_discriminators > 0:
+                    self.add_loss("discriminator", total_loss_G / num_discriminators, weight=self.config.loss_adversarial_scale)
                         
             ###############################################################################
             # Model Reconstruction Loss
@@ -1049,8 +1055,19 @@ class TWISTER(models.Model):
                 
                 # Loss: minimize similarity (or maximize difference)
                 action_contrast_loss = cosine_sim.mean()
-                
-                self.add_loss("action_contrast", action_contrast_loss, weight=self.config.loss_action_contrast_scale)
+
+                start = 10_000
+                end = 20_000
+
+                if self.model_step <= start:
+                    action_contrast_weight = self.config.loss_action_contrast_scale_start
+                elif self.model_step >= end:
+                    action_contrast_weight = self.config.loss_action_contrast_scale_end
+                else:
+                    alpha = (self.model_step - start) / (end - start)
+                    action_contrast_weight = self.config.loss_action_contrast_scale_start + alpha * (self.config.loss_action_contrast_scale_end - self.config.loss_action_contrast_scale_start)
+
+                self.add_loss("action_contrast", action_contrast_loss, weight=action_contrast_weight)
 
             ###############################################################################
             # Flatten and Detach Posts

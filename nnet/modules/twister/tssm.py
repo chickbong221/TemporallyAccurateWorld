@@ -82,12 +82,13 @@ class TSSM(nn.Module):
         # Project motion + action to hidden_size for transformer
         self.motion_action_mixer = modules.MultiLayerPerceptron(
             dim_input=motion_dim + self.num_actions,
-            dim_layers=[self.hidden_size*2, self.hidden_size],
+            dim_layers=[self.hidden_size, self.hidden_size],
             act_fun=[self.act_fun, None],
             weight_init=self.weight_init,
             bias_init=self.bias_init,
             norm=[self.norm, None] if module_pre_norm else self.norm,
-            bias=self.norm is None
+            bias=self.norm is None,
+            residual=[False, True] 
         )
 
         # Transformer processes motion: m_t
