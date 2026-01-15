@@ -159,7 +159,7 @@ class TWISTER(models.Model):
         self.config.loss_kl_post_scale = 0.1
         self.config.loss_action_contrast_scale_start = 0.05
         self.config.loss_action_contrast_scale_end = 0.2
-        self.config.loss_adversarial_scale = 0.5
+        self.config.loss_adversarial_scale = 0.3
 
         # TSSM
         self.config.att_context_left = 8 # C must be <= L
@@ -283,20 +283,6 @@ class TWISTER(models.Model):
             num_mlp_layers=self.config.discount_layers,
             norm=self.config.norm
         )
-        # self.contrastive_network = nn.ModuleList([twister_networks.ContrastiveNetwork(
-        #     feat_size=feat_size + t * self.env.num_actions,
-        #     embed_size=self.config.model_stoch_size * self.config.model_discrete,
-        #     hidden_size=self.config.contrastive_hidden_size,
-        #     out_size=self.config.contrastive_out_size,
-        #     num_layers=self.config.contrastive_layers
-        # ) for t in range(self.config.contrastive_steps)])
-
-        # self.discriminator_network = twister_networks.TemporalDiscriminator(
-        #     num_layers=4,
-        #     num_heads=4,
-        #     dropout=0.1
-        # )
-
         self.discriminator_network = nn.ModuleList([
             twister_networks.TemporalDiscriminator(
                 proj_dim=self.config.adversarial_proj_dim[i],
@@ -311,8 +297,6 @@ class TWISTER(models.Model):
         def count_parameters(model_list):
             total_params = sum(p.numel() for model in model_list for p in model.parameters())
             print(f"Total parameters in ModuleList: {total_params:,}")
-
-        # count_parameters(self.temporal_order_discriminator)
 
         # Slow Moving Networks
         self.add_frozen("v_target", copy.deepcopy(self.value_network))
@@ -999,12 +983,12 @@ class TWISTER(models.Model):
                 if num_discriminators > 0:
                     
                     start = 10_000
-                    end = 30_000
+                    end = 20_000
 
                     if self.model_step <= start:
                         adv_weight = 0.0
                     elif self.model_step >= end:
-                        adv_weight = self.config.loss_adversarial_scale  # 0.5
+                        adv_weight = self.config.loss_adversarial_scale  # 0.3
                     else:
                         alpha = (self.model_step - start) / (end - start)
                         adv_weight = alpha * self.config.loss_adversarial_scale
@@ -1066,7 +1050,7 @@ class TWISTER(models.Model):
                 # Loss: minimize similarity (or maximize difference)
                 action_contrast_loss = cosine_sim.mean()
 
-                start = 10_000
+                start = 5_000
                 end = 20_000
 
                 if self.model_step <= start:
