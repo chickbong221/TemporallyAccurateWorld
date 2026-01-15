@@ -41,7 +41,7 @@ class TWISTER(models.Model):
         model_sizes = {
             "S": AttrDict({
                 "dim_cnn": 32,
-                "hidden_size": 256,
+                "hidden_size": 512,
                 "num_layers": 2,
 
                 "stoch_size": 32,
@@ -191,8 +191,8 @@ class TWISTER(models.Model):
         self.config.random_pre_fill_steps = True
 
         # Log Figure
-        self.config.log_figure_batch = 16
-        self.config.log_figure_context_frames = 5
+        self.config.log_figure_batch = 1
+        self.config.log_figure_context_frames = 10
 
         # Override Config
         for key, value in override_config.items():
