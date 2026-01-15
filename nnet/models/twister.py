@@ -171,14 +171,6 @@ class TWISTER(models.Model):
         self.config.module_pre_norm = False
         self.config.detach_decoder = False
 
-        # Contrastive
-        self.config.contrastive_augments = torchvision.transforms.RandomResizedCrop(size=(64, 64), antialias=True, scale=(0.25, 1))
-        self.config.contrastive_hidden_size = self.config.model_hidden_size
-        self.config.contrastive_out_size = self.config.contrastive_hidden_size
-        self.config.contrastive_steps = 1
-        self.config.contrastive_exp_lambda = 0.75
-        self.config.contrastive_layers = 2
-
         # Adversarial
         self.config.window_size = [4, 16]
         self.config.num_seq_to_discriminate = [32, 32]
@@ -192,7 +184,7 @@ class TWISTER(models.Model):
 
         # Log Figure
         self.config.log_figure_batch = 1
-        self.config.log_figure_context_frames = 10
+        self.config.log_figure_context_frames = 5
 
         # Override Config
         for key, value in override_config.items():
