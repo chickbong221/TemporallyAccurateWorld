@@ -27,7 +27,7 @@ epoch_length = model.config.epoch_length
 if os.environ.get("run_name", False):
     callback_path = (
     f"callbacks/{os.environ['run_name']}/"
-    f"{env_name}_motion_content_ver3{time.time()}"
+    f"{env_name}_motion_content_ver3_small{time.time()}"
 )
 else:
     callback_path = "callbacks/{}".format(env_name)

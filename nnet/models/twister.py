@@ -39,9 +39,51 @@ class TWISTER(models.Model):
 
         # Model Sizes
         model_sizes = {
-            "S": AttrDict({
+            "SXL": AttrDict({
                 "dim_cnn": 32,
                 "hidden_size": 512,
+                "num_layers": 2,
+
+                "stoch_size": 32,
+                "discrete": 32,
+
+                "num_blocks_trans": 4,
+                "ff_ratio_trans": 2,
+                "num_heads_trans": 8,
+                "drop_rate_trans": 0.1
+            }),
+
+            "SL": AttrDict({
+                "dim_cnn": 32,
+                "hidden_size": 392,
+                "num_layers": 2,
+
+                "stoch_size": 32,
+                "discrete": 32,
+
+                "num_blocks_trans": 4,
+                "ff_ratio_trans": 2,
+                "num_heads_trans": 8,
+                "drop_rate_trans": 0.1
+            }),
+
+            "SM": AttrDict({
+                "dim_cnn": 32,
+                "hidden_size": 256,
+                "num_layers": 2,
+
+                "stoch_size": 32,
+                "discrete": 32,
+
+                "num_blocks_trans": 4,
+                "ff_ratio_trans": 2,
+                "num_heads_trans": 8,
+                "drop_rate_trans": 0.1
+            }),
+
+            "SS": AttrDict({
+                "dim_cnn": 32,
+                "hidden_size": 128,
                 "num_layers": 2,
 
                 "stoch_size": 32,
@@ -68,19 +110,20 @@ class TWISTER(models.Model):
         if self.env_type == "dmc":
             self.config.env_class = envs.dm_control.dm_control_dict[env_name[1]]
             self.config.env_params = {"task": env_name[2], "history_frames": 1, "img_size": (64, 64), "action_repeat": 2}
-            self.config.model_size = "S"
+            self.config.model_size = "SXL"
             self.config.time_limit = 1000
             self.config.time_limit_eval = 1000
         elif self.env_type == "atari100k":
             self.config.env_class = envs.atari.AtariEnv
             self.config.env_params = {"game": env_name[1], "history_frames": 1, "img_size": (64, 64), "action_repeat": 4, "grayscale_obs": False, "noop_max": 30, "repeat_action_probability": 0.0, "full_action_space": False}
-            self.config.model_size = "S"
+            self.config.model_size = "SXL"
             self.config.time_limit = 108000
             self.config.time_limit_eval = 108000
         self.config.eval_env_params = {}
         self.config.train_env_params = {}
 
         # Training
+        self.config.att_context_left = 8 # C must be <= L
         self.config.batch_size = 16
         self.config.L = 64
         self.config.H = 15
@@ -116,6 +159,15 @@ class TWISTER(models.Model):
         self.config.return_norm_limit = 1.0
         self.config.return_norm_perc_low = 0.05
         self.config.return_norm_perc_high = 0.95
+
+        # Override Config
+        for key, value in override_config.items():
+            assert key in self.config, "{} not in config".format(key)
+
+            if key=="precision":
+                self.config[key] = {"float16": torch.float16, "float32": torch.float32}[value]
+            else:
+                self.config[key] = value
 
         # World Model Params
         model_params = model_sizes[self.config.model_size]
@@ -157,12 +209,10 @@ class TWISTER(models.Model):
         self.config.loss_decoder_scale = 1.0
         self.config.loss_kl_prior_scale = 0.5
         self.config.loss_kl_post_scale = 0.1
-        self.config.loss_action_contrast_scale_start = 0.05
-        self.config.loss_action_contrast_scale_end = 0.2
-        self.config.loss_adversarial_scale = 0.3
+        self.config.loss_action_contrast_scale = 0.15
+        self.config.loss_adversarial_scale = 0.35
 
         # TSSM
-        self.config.att_context_left = 8 # C must be <= L
         self.config.num_blocks_trans = model_params.num_blocks_trans
         self.config.ff_ratio_trans = model_params.ff_ratio_trans
         self.config.num_heads_trans = model_params.num_heads_trans
@@ -172,12 +222,15 @@ class TWISTER(models.Model):
         self.config.detach_decoder = False
 
         # Adversarial
-        self.config.window_size = [4, 16]
+        self.config.window_size = [16, 32]
         self.config.num_seq_to_discriminate = [32, 32]
-        self.config.adversarial_hidden_dim = [192, 256, 384]
+        self.config.adversarial_hidden_dim = [128, 192, 384]
         self.config.adversarial_proj_dim = [128, 192, 256]
-        self.config.adversarial_num_heads = [2, 4, 6]
+        # self.config.adversarial_num_heads = [2, 4, 6]
         self.config.adversarial_num_layers = [1, 1, 2]
+
+        # Action Contrastive
+        self.config.timestep_start = 10_000
 
         # Sample Pre Fill Steps
         self.config.random_pre_fill_steps = True
@@ -185,15 +238,6 @@ class TWISTER(models.Model):
         # Log Figure
         self.config.log_figure_batch = 1
         self.config.log_figure_context_frames = 5
-
-        # Override Config
-        for key, value in override_config.items():
-            assert key in self.config, "{} not in config".format(key)
-
-            if key=="precision":
-                self.config[key] = {"float16": torch.float16, "float32": torch.float32}[value]
-            else:
-                self.config[key] = value
 
         # Config asserts
         assert self.config.att_context_left <= self.config.L
@@ -220,7 +264,7 @@ class TWISTER(models.Model):
             self.env_eval = None
 
         # Networks
-        feat_size = self.config.model_stoch_size * self.config.model_discrete * 2 if self.config.model_discrete else self.config.model_stoch_size + self.config.model_hidden_size
+        feat_size = self.config.model_stoch_size * self.config.model_discrete + self.config.model_hidden_size if self.config.model_discrete else self.config.model_stoch_size + self.config.model_hidden_size
         self.encoder_network = twister_networks.EncoderNetwork(
             dim_input_cnn=self.config.image_channels, 
             dim_cnn=self.config.dim_cnn,
@@ -250,7 +294,7 @@ class TWISTER(models.Model):
         )
         self.policy_network = twister_networks.PolicyNetwork(
             num_actions=self.env.num_actions, 
-            hidden_size=self.config.action_hidden_size, 
+            hidden_size=512, 
             feat_size=feat_size, 
             num_mlp_layers=self.config.action_layers, 
             discrete=self.config.policy_discrete,
@@ -258,7 +302,7 @@ class TWISTER(models.Model):
             sampling_tmp=self.config.sampling_tmp
         )
         self.value_network = twister_networks.ValueNetwork(
-            hidden_size=self.config.value_hidden_size, 
+            hidden_size=512, 
             feat_size=feat_size, 
             num_mlp_layers=self.config.value_layers,
             norm=self.config.norm
@@ -280,8 +324,8 @@ class TWISTER(models.Model):
                 proj_dim=self.config.adversarial_proj_dim[i],
                 hidden_dim=self.config.adversarial_hidden_dim[i],
                 num_layers=self.config.adversarial_num_layers[i],
-                num_heads=self.config.adversarial_num_heads[i],
-                dropout=0.05,
+                # num_heads=self.config.adversarial_num_heads[i],
+                dropout=0.1,
             )
             for i in range(len(self.config.window_size))
         ])
@@ -860,7 +904,7 @@ class TWISTER(models.Model):
             latent = self.encoder_network(states)
 
             # Model Observe (B, L, D)
-            if self.model_step >= 10000:
+            if self.model_step >= self.config.timestep_start:
                 posts, priors, action_contrast_outputs = self.rssm.observe(
                     states=latent, 
                     prev_actions=actions, 
@@ -975,7 +1019,7 @@ class TWISTER(models.Model):
                 if num_discriminators > 0:
                     
                     start = 10_000
-                    end = 20_000
+                    end = 30_000
 
                     if self.model_step <= start:
                         adv_weight = 0.0
@@ -1042,16 +1086,16 @@ class TWISTER(models.Model):
                 # Loss: minimize similarity (or maximize difference)
                 action_contrast_loss = cosine_sim.mean()
 
-                start = 5_000
-                end = 20_000
+                start = self.config.timestep_start
+                end = 30_000
 
                 if self.model_step <= start:
-                    action_contrast_weight = self.config.loss_action_contrast_scale_start
+                    action_contrast_weight = 0
                 elif self.model_step >= end:
-                    action_contrast_weight = self.config.loss_action_contrast_scale_end
+                    action_contrast_weight = self.config.loss_action_contrast_scale
                 else:
                     alpha = (self.model_step - start) / (end - start)
-                    action_contrast_weight = self.config.loss_action_contrast_scale_start + alpha * (self.config.loss_action_contrast_scale_end - self.config.loss_action_contrast_scale_start)
+                    action_contrast_weight = alpha * self.config.loss_action_contrast_scale
 
                 self.add_loss("action_contrast", action_contrast_loss, weight=action_contrast_weight)
 
@@ -1635,26 +1679,44 @@ class TWISTER(models.Model):
         # Shift to 0..1 for display
         states_shift = states.clip(-0.5, 0.5) + 0.5
         states_rec_shift = states_rec.clip(-0.5, 0.5) + 0.5
-        error_shift = 1 - torch.abs(states_rec_shift - states_shift).mean(dim=2, keepdim=True).repeat(1, 1, 3, 1, 1)
+        error_rec_shift = 1 - torch.abs(states_rec_shift - states_shift).mean(dim=2, keepdim=True).repeat(1, 1, 3, 1, 1)
         states_img_shift = states_img.clip(-0.5, 0.5) + 0.5
+        error_img_shift = 1 - torch.abs(states_img_shift - states_shift).mean(dim=2, keepdim=True).repeat(1, 1, 3, 1, 1)
 
-        # Expand is_firsts
-        is_firsts = is_firsts.unsqueeze(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1).expand_as(states) * states_shift
-
-        # Concat Outputs
-        outputs = torch.concat([
-            is_firsts,
-            states_shift,
-            states_rec_shift,
-            error_shift,
-            states_img_shift,
-        ], dim=1).flatten(start_dim=0, end_dim=1)
-
-        # Add Figure to logs
+        # Add Figure to logs - split into 5-frame chunks, skip last 4 frames
         if writer is not None:
-            # Log Image (main)
-            fig = torchvision.utils.make_grid(outputs, nrow=self.config.L, normalize=False, scale_each=False).cpu()
-            writer.add_image(tag, fig, step)
+            # Calculate number of frames to use (skip last 4)
+            num_frames = self.config.L - 4
+            chunk_size = 5
+            num_chunks = num_frames // chunk_size
+            
+            for chunk_idx in range(num_chunks):
+                # Extract 5 frames from each visualization type
+                start_frame = chunk_idx * chunk_size
+                end_frame = start_frame + chunk_size
+                
+                # Get the chunk for each visualization type
+                states_chunk = states_shift[:, start_frame:end_frame]
+                states_rec_chunk = states_rec_shift[:, start_frame:end_frame]
+                error_rec_chunk = error_rec_shift[:, start_frame:end_frame]
+                states_img_chunk = states_img_shift[:, start_frame:end_frame]
+                error_img_chunk = error_img_shift[:, start_frame:end_frame]
+                
+                # Concat the 5 visualization types for this chunk
+                chunk_outputs = torch.concat([
+                    states_chunk,
+                    states_rec_chunk,
+                    error_rec_chunk,
+                    states_img_chunk,
+                    error_img_chunk,
+                ], dim=1).flatten(start_dim=0, end_dim=1)  # (B*5*5, C, H, W)
+                
+                # Create grid: 5 columns (time frames), 5*B rows (visualization types * batch)
+                fig = torchvision.utils.make_grid(chunk_outputs, nrow=chunk_size, normalize=False, scale_each=False).cpu()
+                
+                # Log with chunk index in tag
+                chunk_tag = f"{tag}/chunk_{chunk_idx}"
+                writer.add_image(chunk_tag, fig, step)
 
         # Default Mode: restore training/eval mode
         self.train(mode=mode)

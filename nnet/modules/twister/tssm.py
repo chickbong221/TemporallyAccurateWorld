@@ -79,16 +79,22 @@ class TSSM(nn.Module):
         else:
             raise ValueError(f"Unknown motion type: {self.motion_type}")
 
+        self.content_compressor = modules.Linear(
+            in_features=self.stoch_size * self.discrete if self.discrete else self.stoch_size, 
+            out_features=self.hidden_size,
+            weight_init=self.dist_weight_init,
+            bias_init=self.dist_bias_init
+        )
+
         # Project motion + action to hidden_size for transformer
         self.motion_action_mixer = modules.MultiLayerPerceptron(
-            dim_input=motion_dim + self.num_actions,
+            dim_input=motion_dim + num_actions,
             dim_layers=[self.hidden_size, self.hidden_size],
             act_fun=[self.act_fun, None],
             weight_init=self.weight_init,
             bias_init=self.bias_init,
             norm=[self.norm, None] if module_pre_norm else self.norm,
             bias=self.norm is None,
-            residual=[False, True] 
         )
 
         # Transformer processes motion: m_t
@@ -117,17 +123,25 @@ class TSSM(nn.Module):
             module_pre_norm=module_pre_norm
         )
 
-        # Fuse motion transformer output (m_t) with previous stochastic latent (z_{t-1})
-        self.motion_rescale = modules.Linear(
-            in_features=self.hidden_size, 
-            out_features=self.discrete * self.stoch_size if self.discrete else 2 * self.stoch_size,
-            weight_init=self.dist_weight_init,
-            bias_init=self.dist_bias_init
+        self.content_motion_fuser = modules.MultiLayerPerceptron(
+            dim_input=self.hidden_size * 2,
+            dim_layers=[self.hidden_size * 2, self.hidden_size],
+            act_fun=[self.act_fun, None],
+            weight_init=self.weight_init,
+            bias_init=self.bias_init,
+            norm=[self.norm, None] if module_pre_norm else self.norm,
+            bias=self.norm is None,
         )
 
+        self.content_motion_gate = modules.Linear(
+            in_features=self.hidden_size * 2,
+            out_features=self.hidden_size,
+            weight_init=self.weight_init,
+            bias_init=self.bias_init,
+        )
         # Dynamics Predictor: fused features -> z_t distribution
         self.dynamics_predictor = modules.Linear(
-            in_features=self.discrete * self.stoch_size if self.discrete else 2 * self.stoch_size, 
+            in_features=self.hidden_size, 
             out_features=self.discrete * self.stoch_size if self.discrete else 2 * self.stoch_size,
             weight_init=self.dist_weight_init,
             bias_init=self.dist_bias_init
@@ -222,13 +236,13 @@ class TSSM(nn.Module):
         initial_state = structs.AttrDict(
             logits=torch.zeros(batch_size, seq_length, self.stoch_size, self.discrete, dtype=dtype, device=device),
             stoch=torch.zeros(batch_size, seq_length, self.stoch_size, self.discrete, dtype=dtype, device=device),
-            deter=torch.zeros(batch_size, seq_length, self.stoch_size, self.discrete, dtype=dtype, device=device),
+            deter=torch.zeros(batch_size, seq_length, self.hidden_size, dtype=dtype, device=device),
             hidden=None
         )
 
         # Learned Initial
         if self.learn_initial:
-            initial_state.deter = self.weight_init.repeat(batch_size, seq_length, int(self.stoch_size*self.discrete/self.hidden_size))
+            initial_state.deter = self.weight_init.repeat(batch_size, seq_length, 1)
             initial_state.stoch = self.get_stoch(initial_state.deter) 
 
             # Detach Learned
@@ -416,8 +430,16 @@ class TSSM(nn.Module):
         if return_blocks_deter:
             add_out_dict["blocks_deter"] = outputs.blocks_x
 
-        motion_rescaled = self.motion_rescale(motion_t)
-        fused = stoch_current + motion_rescaled
+        # content = self.content_compressor(stoch_current)
+        # fused = content + motion_t
+
+        content = self.content_compressor(stoch_current)  # (B, 1, H)
+        x = torch.cat([content, motion_t], dim=-1)        # (B, 1, 2H)
+
+        delta = self.content_motion_fuser(x)              # (B, 1, H)
+        gate = torch.sigmoid(self.content_motion_gate(x)) # (B, 1, H)
+
+        fused = content + gate * delta                    # (B, 1, H)
 
         # Predict z_t distribution
         logits = self.dynamics_predictor(fused).reshape(fused.shape[:-1] + (self.stoch_size, self.discrete))
@@ -509,8 +531,13 @@ class TSSM(nn.Module):
         if return_blocks_deter:
             add_out_dict["blocks_deter"] = outputs.blocks_x
 
-        motion_rescaled = self.motion_rescale(motion_t)
-        fused = stoch_current + motion_rescaled
+        content = self.content_compressor(stoch_current)  # (B, 1, H)
+        x = torch.cat([content, motion_t], dim=-1)        # (B, 1, 2H)
+
+        delta = self.content_motion_fuser(x)              # (B, 1, H)
+        gate = torch.sigmoid(self.content_motion_gate(x)) # (B, 1, H)
+
+        fused = content + gate * delta                    # (B, 1, H)
 
         ###############################################################################
         # Action Contrastive Forward Pass
@@ -518,30 +545,32 @@ class TSSM(nn.Module):
         action_contrast_outputs = None
         
         if compute_action_contrast and self.training:
-            # Create contrast actions by shuffling batch dimension
-            batch_indices = torch.randperm(B, device=prev_actions.device)
-            contrast_actions = prev_actions[batch_indices]
-            
-            # Mix motion with contrast action
-            motion_action_contrast = self.motion_action_mixer(
-                torch.cat([motion.detach(), contrast_actions], dim=-1)
+            B, L, A = prev_actions.shape
+            offsets = torch.randint(
+                1, self.num_actions,  # assumes discrete actions
+                size=(B, L, A),
+                device=prev_actions.device
             )
-            
-            # Forward through transformer with detached hidden states
+            contrast_actions = (prev_actions + offsets) % self.num_actions
+
+            # --- Mix motion with contrast action ---
+            motion_action_contrast = self.motion_action_mixer(
+                torch.cat([motion, contrast_actions], dim=-1)
+            )
+
+            # --- Forward through transformer (detach hidden states) ---
             outputs_contrast = self.transformer(
-                motion_action_contrast, 
-                hidden=[(h[0].detach(), h[1].detach()) for h in prev_states["hidden"]] if prev_states["hidden"] is not None else None,
-                mask=mask, 
+                motion_action_contrast,
+                hidden=[(h[0].detach(), h[1].detach()) for h in prev_states["hidden"]]
+                if prev_states["hidden"] is not None else None,
+                mask=mask,
                 return_hidden=False
             )
-            
-            # Compute contrast delta
-            delta_z_contrast = self.motion_rescale(outputs_contrast.x)
-            
-            # Store outputs for loss computation
+
+            # --- Store outputs for loss computation ---
             action_contrast_outputs = {
-                "delta_z": motion_rescaled,
-                "delta_z_contrast": delta_z_contrast
+                "delta_z": motion_t,
+                "delta_z_contrast": outputs_contrast.x
             }
 
         # Predict prior z_t distribution

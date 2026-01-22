@@ -53,7 +53,7 @@ def set_seed(seed: int = 1):
     torch.backends.cudnn.benchmark = False
 
 # Set Seed
-set_seed(290)
+# set_seed(22010209)
 
 def main(args):
 
@@ -134,7 +134,7 @@ if __name__ == "__main__":
     # Training
     parser.add_argument("--saving_period_epoch",        type=int,   default=1,                                                          help="Model saving every 'n' epochs")
     parser.add_argument("--log_figure_period_step",     type=int,   default=None,                                                       help="Log figure every 'n' steps")
-    parser.add_argument("--log_figure_period_epoch",    type=int,   default=1,                                                          help="Log figure every 'n' epochs")
+    parser.add_argument("--log_figure_period_epoch",    type=int,   default=5,                                                          help="Log figure every 'n' epochs")
     parser.add_argument("--step_log_period",            type=int,   default=100,                                                        help="Training step log period")
     parser.add_argument("--keep_last_k",                type=int,   default=3,                                                          help="Keep last k checkpoints")
 

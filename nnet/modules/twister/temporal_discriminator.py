@@ -5,57 +5,118 @@ from torch.nn.utils import spectral_norm
 
 class TemporalDiscriminator(nn.Module):
     
-    def __init__(self,
-                 dim_real=1024,
-                 proj_dim=192,
-                 hidden_dim=256,
-                 num_layers=1,
-                 num_heads=1,
-                 dropout=0.05):
+    # def __init__(self,
+    #              dim_real=1024,
+    #              proj_dim=192,
+    #              hidden_dim=256,
+    #              num_layers=1,
+    #              num_heads=1,
+    #              dropout=0.05):
+    #     super().__init__()
+
+    #     # 1) Small projection
+    #     self.proj = nn.Sequential(
+    #         spectral_norm(nn.Linear(dim_real, proj_dim)),
+    #         nn.LeakyReLU(0.2, inplace=True),
+    #     )
+
+    #     # 2) Lightweight temporal conv
+    #     self.temporal_conv = nn.Sequential(
+    #         spectral_norm(nn.Conv1d(proj_dim, hidden_dim, kernel_size=3, padding=1)),
+    #         nn.LeakyReLU(0.2, inplace=True),
+    #     )
+
+    #     # 3) Small transformer (only 1 layer)
+    #     encoder_layer = nn.TransformerEncoderLayer(
+    #         d_model=hidden_dim,
+    #         nhead=num_heads,
+    #         dim_feedforward=hidden_dim * 2,  # 384 instead of 1024+
+    #         dropout=dropout,
+    #         activation="gelu",
+    #         batch_first=True,
+    #     )
+    #     self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+    #     # 4) Final classifier
+    #     self.fc = nn.Sequential(
+    #         spectral_norm(nn.Linear(hidden_dim, hidden_dim // 2)),  # 192 → 96
+    #         nn.LeakyReLU(0.2, inplace=True),
+    #         spectral_norm(nn.Linear(hidden_dim // 2, 1)),
+    #     )
+
+    # def forward(self, z):
+    #     """
+    #     z: [B, L, D]
+    #     """
+    #     x = self.proj(z)              # (B, L, 128)
+
+    #     x = x.transpose(1, 2)         # (B, 128, L)
+    #     x = self.temporal_conv(x)     # (B, 192, L)
+    #     x = x.transpose(1, 2)         # (B, L, 192)
+
+    #     x = self.transformer(x)       # (B, L, 192)
+    #     x = x.mean(dim=1)             # (B, 192)
+
+    #     logits = self.fc(x)           # (B, 1)
+    #     return logits.squeeze(-1)
+
+    def __init__(
+        self,
+        dim_real=1024,
+        proj_dim=128,
+        hidden_dim=128,
+        num_layers=3,
+        kernel_size=3,
+        dropout=0.1,
+    ):
         super().__init__()
 
-        # 1) Small projection
+        # 1) Frame-wise projection (no temporal mixing)
         self.proj = nn.Sequential(
             spectral_norm(nn.Linear(dim_real, proj_dim)),
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-        # 2) Lightweight temporal conv
-        self.temporal_conv = nn.Sequential(
-            spectral_norm(nn.Conv1d(proj_dim, hidden_dim, kernel_size=3, padding=1)),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
+        # 2) Temporal conv stack (LOCAL receptive field)
+        convs = []
+        in_ch = proj_dim
+        for _ in range(num_layers):
+            convs.append(
+                spectral_norm(
+                    nn.Conv1d(
+                        in_ch,
+                        hidden_dim,
+                        kernel_size=kernel_size,
+                        padding=kernel_size // 2,
+                    )
+                )
+            )
+            convs.append(nn.LeakyReLU(0.2, inplace=True))
+            convs.append(nn.Dropout(dropout))
+            in_ch = hidden_dim
 
-        # 3) Small transformer (only 1 layer)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim * 2,  # 384 instead of 1024+
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.temporal_conv = nn.Sequential(*convs)
 
-        # 4) Final classifier
-        self.fc = nn.Sequential(
-            spectral_norm(nn.Linear(hidden_dim, hidden_dim // 2)),  # 192 → 96
-            nn.LeakyReLU(0.2, inplace=True),
-            spectral_norm(nn.Linear(hidden_dim // 2, 1)),
-        )
+        # 3) Patch-level classifier (NO global pooling)
+        self.classifier = spectral_norm(nn.Conv1d(hidden_dim, 1, kernel_size=1))
 
     def forward(self, z):
         """
         z: [B, L, D]
+        returns: [B] scalar logits
         """
-        x = self.proj(z)              # (B, L, 128)
+        # (B, L, proj_dim)
+        x = self.proj(z)
 
-        x = x.transpose(1, 2)         # (B, 128, L)
-        x = self.temporal_conv(x)     # (B, 192, L)
-        x = x.transpose(1, 2)         # (B, L, 192)
+        # (B, proj_dim, L)
+        x = x.transpose(1, 2)
 
-        x = self.transformer(x)       # (B, L, 192)
-        x = x.mean(dim=1)             # (B, 192)
+        # (B, hidden_dim, L)
+        x = self.temporal_conv(x)
 
-        logits = self.fc(x)           # (B, 1)
-        return logits.squeeze(-1)
+        # (B, 1, L)
+        logits = self.classifier(x)
+
+        # IMPORTANT: weak aggregation
+        # Mean over *patches*, not features
+        return logits.mean(dim=2).squeeze(1)
