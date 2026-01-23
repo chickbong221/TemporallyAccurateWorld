@@ -160,6 +160,15 @@ class TWISTER(models.Model):
         self.config.return_norm_perc_low = 0.05
         self.config.return_norm_perc_high = 0.95
 
+        # Loss Scales
+        self.config.loss_reward_scale = 1.0
+        self.config.loss_discount_scale = 1.0
+        self.config.loss_decoder_scale = 1.0
+        self.config.loss_kl_prior_scale = 0.5
+        self.config.loss_kl_post_scale = 0.1
+        self.config.loss_action_contrast_scale = 0.1
+        self.config.loss_adversarial_scale = 0.3
+
         # Override Config
         for key, value in override_config.items():
             assert key in self.config, "{} not in config".format(key)
@@ -202,15 +211,6 @@ class TWISTER(models.Model):
         self.config.target_value_reg = True
         self.config.critic_ema_decay = 0.02
         self.config.critic_slow_reg_scale = 1.0
-
-        # Loss Scales
-        self.config.loss_reward_scale = 1.0
-        self.config.loss_discount_scale = 1.0
-        self.config.loss_decoder_scale = 1.0
-        self.config.loss_kl_prior_scale = 0.5
-        self.config.loss_kl_post_scale = 0.1
-        self.config.loss_action_contrast_scale = 0.15
-        self.config.loss_adversarial_scale = 0.35
 
         # TSSM
         self.config.num_blocks_trans = model_params.num_blocks_trans
