@@ -17,6 +17,7 @@ import torch
 from torch import nn
 import torchvision
 import random
+import wandb
 
 # NeuralNets
 from nnet import models
@@ -1569,7 +1570,7 @@ class TWISTER(models.Model):
         # batch_losses, batch_metrics, batch_truths, batch_preds
         return {}, outputs, {}, {}
     
-    def log_figure(self, step, inputs, targets, writer, tag, save_image=False):
+    def log_figure(self, epoch, inputs, targets, writer, tag, save_image=False):
         # Eval Mode
         mode = self.training
         self.eval()
@@ -1684,39 +1685,44 @@ class TWISTER(models.Model):
         error_img_shift = 1 - torch.abs(states_img_shift - states_shift).mean(dim=2, keepdim=True).repeat(1, 1, 3, 1, 1)
 
         # Add Figure to logs - split into 5-frame chunks, skip last 4 frames
-        if writer is not None:
-            # Calculate number of frames to use (skip last 4)
-            num_frames = self.config.L - 4
-            chunk_size = 5
-            num_chunks = num_frames // chunk_size
-            
-            for chunk_idx in range(num_chunks):
-                # Extract 5 frames from each visualization type
-                start_frame = chunk_idx * chunk_size
-                end_frame = start_frame + chunk_size
-                
-                # Get the chunk for each visualization type
-                states_chunk = states_shift[:, start_frame:end_frame]
-                states_rec_chunk = states_rec_shift[:, start_frame:end_frame]
-                error_rec_chunk = error_rec_shift[:, start_frame:end_frame]
-                states_img_chunk = states_img_shift[:, start_frame:end_frame]
-                error_img_chunk = error_img_shift[:, start_frame:end_frame]
-                
-                # Concat the 5 visualization types for this chunk
-                chunk_outputs = torch.concat([
+        # Calculate number of frames to use (skip last 4)
+        num_frames = self.config.L - 4
+        chunk_size = 5
+        num_chunks = num_frames // chunk_size
+        
+        for chunk_idx in range(num_chunks):
+            # Extract 5 frames from each visualization type
+            start_frame = chunk_idx * chunk_size
+            end_frame = start_frame + chunk_size
+
+            states_chunk = states_shift[:, start_frame:end_frame]
+            states_rec_chunk = states_rec_shift[:, start_frame:end_frame]
+            error_rec_chunk = error_rec_shift[:, start_frame:end_frame]
+            states_img_chunk = states_img_shift[:, start_frame:end_frame]
+            error_img_chunk = error_img_shift[:, start_frame:end_frame]
+
+            # Concat the 5 visualization types for this chunk
+            chunk_outputs = torch.concat(
+                [
                     states_chunk,
                     states_rec_chunk,
                     error_rec_chunk,
                     states_img_chunk,
                     error_img_chunk,
-                ], dim=1).flatten(start_dim=0, end_dim=1)  # (B*5*5, C, H, W)
-                
-                # Create grid: 5 columns (time frames), 5*B rows (visualization types * batch)
-                fig = torchvision.utils.make_grid(chunk_outputs, nrow=chunk_size, normalize=False, scale_each=False).cpu()
-                
-                # Log with chunk index in tag
-                chunk_tag = f"{tag}/chunk_{chunk_idx}"
-                writer.add_image(chunk_tag, fig, step)
+                ],
+                dim=1
+            ).flatten(start_dim=0, end_dim=1)  # (B*5*5, C, H, W)
+
+            # Create grid: 5 columns (time frames)
+            fig = torchvision.utils.make_grid(
+                chunk_outputs,
+                nrow=chunk_size,
+                normalize=False,
+                scale_each=False,
+            )
+
+            # Log to wandb
+            wandb.log({f"{tag}/chunk_{chunk_idx}": wandb.Image(fig)})
 
         # Default Mode: restore training/eval mode
         self.train(mode=mode)
