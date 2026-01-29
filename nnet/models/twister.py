@@ -56,7 +56,7 @@ class TWISTER(models.Model):
 
             "SL": AttrDict({
                 "dim_cnn": 32,
-                "hidden_size": 392,
+                "hidden_size": 384,
                 "num_layers": 2,
 
                 "stoch_size": 32,
@@ -225,10 +225,9 @@ class TWISTER(models.Model):
         # Adversarial
         self.config.window_size = [16, 32]
         self.config.num_seq_to_discriminate = [32, 32]
-        self.config.adversarial_hidden_dim = [128, 192, 384]
-        self.config.adversarial_proj_dim = [128, 192, 256]
-        # self.config.adversarial_num_heads = [2, 4, 6]
-        self.config.adversarial_num_layers = [1, 1, 2]
+        self.config.adversarial_hidden_dim = [128, 128]
+        self.config.adversarial_proj_dim = [128, 128]
+        self.config.adversarial_num_layers = [1, 1]
 
         # Action Contrastive
         self.config.timestep_start = 10_000
@@ -796,6 +795,7 @@ class TWISTER(models.Model):
         # World Train Step
         ###############################################################################
 
+        print("world")
         # World Model Step
         self.set_require_grad([self.policy_network, self.value_network], False)
         self.set_require_grad([self.encoder_network, self.decoder_network, self.rssm, self.reward_network, self.continue_network], True)
@@ -810,7 +810,7 @@ class TWISTER(models.Model):
 
         # Eval Mode: Disable Dropout
         self.rssm.eval()
-
+        print("actor")
         self.set_require_grad(self.policy_network, True)
         self.set_require_grad([self.value_network, self.encoder_network, self.decoder_network, self.rssm, self.reward_network, self.continue_network], False)
         actor_model_batch_losses, actor_model_batch_metrics, _ = self.actor_model.train_step(inputs, targets, precision, grad_scaler, accumulated_steps, acc_step, eval_training)
@@ -822,6 +822,7 @@ class TWISTER(models.Model):
         # Value Model Step
         ###############################################################################
 
+        print("critic")
         self.set_require_grad(self.value_network, True)
         self.set_require_grad([self.policy_network, self.encoder_network, self.decoder_network, self.rssm, self.reward_network, self.continue_network], False)
         critic_model_batch_losses, critic_model_batch_metrics, _ = self.critic_model.train_step(inputs, targets, precision, grad_scaler, accumulated_steps, acc_step, eval_training)

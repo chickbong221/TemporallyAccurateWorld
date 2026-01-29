@@ -32,6 +32,9 @@ import wandb
 # Disable Warnings
 warnings.filterwarnings("ignore")
 
+import logging
+logging.getLogger("fvcore.nn.jit_analysis").setLevel(logging.ERROR)
+
 def set_seed(seed: int = 1):
     import os
     import random
@@ -60,9 +63,6 @@ def main(args):
     ###############################################################################
     # Init
     ###############################################################################
-
-    if args.wandb:
-        wandb.login(key="b1d6eed8871c7668a889ae74a621b5dbd2f3b070")
 
     # Print Mode
     print("Mode: {}".format(args.mode))
