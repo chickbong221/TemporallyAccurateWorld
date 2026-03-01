@@ -1,20 +1,3 @@
-# Learning Transformer-based World Models with Contrastive Predictive Coding (TWISTER)
-
-This is the official repository of TWISTER (Transformer-based World model wIth contraSTivE Representations).
-
-**Read TWISTER paper on [OpenReview](https://openreview.net/forum?id=YK9G4Htdew) |
-[Arxiv](https://arxiv.org/abs/2503.04416)**
-
-<img src='media/twister.gif' width="100%"/>
-
-## Method
-
-We introduce TWISTER, a Transformer model-based reinforcement learning algorithm using action-conditioned Contrastive Predictive Coding (AC-CPC) to learn high-level feature representations and improve the agent performance. We evaluate our method on the commonly used Atari 100k benchmark and DeepMind Control Suite, demonstrating stronger performance in both discrete and continuous action spaces.
-
-<img src='media/method.png' width="100%"/>
-
-The world model learns feature representations by maximizing the mutual information between model states and future stochastic states obtained from augmented views of image observations. The encoder network converts image observations into stochastic states, from which a decoder network learns to reconstruct images while the masked attention Transformer network predicts next episode continuations, rewards and stochastic states conditioned on selected actions. The actor and critic networks are trained in latent space with imaginary trajectories generated from the world model to select actions maximizing the expected sum of future rewards.
-
 ## Installation
 
 Clone GitHub repository and set up environment
